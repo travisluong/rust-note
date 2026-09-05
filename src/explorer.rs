@@ -41,6 +41,31 @@ fn visible(path: &Path, depth: usize, expanded: &HashSet<PathBuf>, rows: &mut Ve
     }
 }
 
+fn notebook_rows(roots: &[PathBuf], expanded: &HashSet<PathBuf>) -> (Vec<Row>, Vec<String>) {
+    let mut rows = Vec::new();
+    let mut errors = Vec::new();
+    for root in roots {
+        match entries(root) {
+            Ok(children) => {
+                for child in children {
+                    if child.directory {
+                        visible(&child.path, 0, expanded, &mut rows);
+                    } else {
+                        rows.push(Row {
+                            path: child.path,
+                            directory: false,
+                            depth: 0,
+                            error: None,
+                        });
+                    }
+                }
+            }
+            Err(error) => errors.push(format!("Cannot read {}: {error}", root.display())),
+        }
+    }
+    (rows, errors)
+}
+
 #[derive(Default)]
 pub struct Actions {
     pub open_file: Option<PathBuf>,
@@ -57,7 +82,7 @@ pub struct Explorer {
 impl Explorer {
     pub fn open_root(&mut self, path: PathBuf) {
         self.expanded.insert(path.clone());
-        self.selected = Some(path);
+        self.selected = None;
     }
     pub fn retain_roots(&mut self, roots: &[PathBuf]) {
         let retained = |path: &PathBuf| roots.iter().any(|root| path.starts_with(root));
@@ -109,10 +134,7 @@ impl Explorer {
     }
 
     pub fn show(&mut self, ui: &mut egui::Ui, roots: &[PathBuf], enabled: bool) -> Actions {
-        let mut rows = Vec::new();
-        for root in roots {
-            visible(root, 0, &self.expanded, &mut rows);
-        }
+        let (mut rows, mut errors) = notebook_rows(roots, &self.expanded);
         if ui.input(|i| {
             i.pointer.any_pressed()
                 && i.pointer
@@ -133,15 +155,30 @@ impl Explorer {
             ] {
                 if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, key)) {
                     clicked = self.navigate(&rows, key);
-                    rows.clear();
-                    for root in roots {
-                        visible(root, 0, &self.expanded, &mut rows);
-                    }
+                    (rows, errors) = notebook_rows(roots, &self.expanded);
                     scroll = true;
                 }
             }
         }
+        ui.add_enabled_ui(enabled, |ui| {
+            ui.menu_button("New…", |ui| {
+                if let Some(root) = roots.first() {
+                    for (label, folder) in [("New Note…", false), ("New Folder…", true)] {
+                        if ui.button(label).clicked() {
+                            new_entry = Some((root.clone(), folder));
+                            ui.close_menu();
+                        }
+                    }
+                }
+            });
+        });
         egui::ScrollArea::both().show(ui, |ui| {
+            for error in &errors {
+                ui.colored_label(egui::Color32::LIGHT_RED, error);
+            }
+            if rows.is_empty() && errors.is_empty() {
+                ui.weak("This notebook is empty.");
+            }
             for row in &rows {
                 ui.horizontal(|ui| {
                     ui.add_space(row.depth as f32 * 16.0);
@@ -250,12 +287,15 @@ mod tests {
             ..Default::default()
         };
         let navigate = |ex: &mut Explorer, key| {
-            let mut rows = Vec::new();
-            visible(&root, 0, &ex.expanded, &mut rows);
+            let (rows, errors) = notebook_rows(std::slice::from_ref(&root), &ex.expanded);
+            assert!(errors.is_empty());
+            assert!(rows.iter().all(|row| row.path != root));
+            assert_eq!(rows[0].depth, 0);
             ex.navigate(&rows, key)
         };
-        navigate(&mut explorer, egui::Key::ArrowRight);
         navigate(&mut explorer, egui::Key::ArrowDown);
+        assert_eq!(explorer.selected, Some(root.join("folder")));
+        navigate(&mut explorer, egui::Key::ArrowLeft);
         assert_eq!(explorer.selected, Some(root.join("folder")));
         navigate(&mut explorer, egui::Key::ArrowRight);
         navigate(&mut explorer, egui::Key::ArrowDown);

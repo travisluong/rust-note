@@ -539,7 +539,12 @@ impl eframe::App for Notes {
 
         egui::TopBottomPanel::top("menu").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
-                ui.strong("Rust Note");
+                ui.strong(
+                    self.roots
+                        .first()
+                        .map(|path| name(path))
+                        .unwrap_or_else(|| "Rust Note".into()),
+                );
                 ui.separator();
                 ui.menu_button("File", |ui| {
                     if ui.button("Manage Notebooks    Ctrl+O").clicked() {
