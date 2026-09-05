@@ -176,23 +176,9 @@ impl Explorer {
                 }
             }
         }
-        if enabled
-            && egui::DragAndDrop::has_payload_of_type::<PathBuf>(ui.ctx())
-            && let Some(root) = roots.first()
-        {
-            let response = ui.label("Drop here to move to notebook root");
-            if response.dnd_hover_payload::<PathBuf>().is_some() {
-                ui.painter().rect_filled(
-                    response.rect,
-                    2.0,
-                    ui.visuals().selection.bg_fill.linear_multiply(0.4),
-                );
-            }
-            if let Some(source) = response.dnd_release_payload::<PathBuf>() {
-                moved = Some(((*source).clone(), root.clone()));
-            }
-        }
+        let sidebar_size = ui.available_size();
         egui::ScrollArea::both().show(ui, |ui| {
+            let content_top = ui.cursor().top();
             for error in &errors {
                 ui.colored_label(egui::Color32::LIGHT_RED, error);
             }
@@ -238,7 +224,14 @@ impl Explorer {
                     if enabled {
                         response = response.interact(egui::Sense::click_and_drag());
                         response.dnd_set_drag_payload(row.path.clone());
-                        if row.directory {
+                        let destination = if row.directory {
+                            Some(row.path.as_path())
+                        } else if row.depth == 0 {
+                            row.path.parent()
+                        } else {
+                            None
+                        };
+                        if let Some(destination) = destination {
                             if response.dnd_hover_payload::<PathBuf>().is_some() {
                                 ui.painter().rect_filled(
                                     response.rect,
@@ -247,7 +240,7 @@ impl Explorer {
                                 );
                             }
                             if let Some(source) = response.dnd_release_payload::<PathBuf>() {
-                                moved = Some(((*source).clone(), row.path.clone()));
+                                moved = Some(((*source).clone(), destination.to_owned()));
                             }
                         }
                     }
@@ -280,6 +273,22 @@ impl Explorer {
                 });
                 if let Some(error) = &row.error {
                     ui.colored_label(egui::Color32::LIGHT_RED, error);
+                }
+            }
+            // Keep an empty drop area below the tree, including when it fills the viewport.
+            let remaining = (sidebar_size.y - (ui.cursor().top() - content_top)).max(32.0);
+            let response =
+                ui.allocate_response(egui::vec2(sidebar_size.x, remaining), egui::Sense::hover());
+            if enabled && let Some(root) = roots.first() {
+                if response.dnd_hover_payload::<PathBuf>().is_some() {
+                    ui.painter().rect_filled(
+                        response.rect,
+                        2.0,
+                        ui.visuals().selection.bg_fill.linear_multiply(0.4),
+                    );
+                }
+                if let Some(source) = response.dnd_release_payload::<PathBuf>() {
+                    moved = Some(((*source).clone(), root.clone()));
                 }
             }
         });
