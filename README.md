@@ -11,7 +11,7 @@ cargo run
 ```
 
 - Choose **File → Manage Notebooks** (Ctrl+O / Cmd+O), then **Open folder as notebook…** to select a folder. It is added to the saved notebook registry and opened in the sidebar. Duplicate paths are ignored.
-- Choose a notebook from **File → Notebooks** to browse it in the sidebar. Hover over its name to see its full path. Switching notebooks preserves the current note and any unsaved draft.
+- Choose a notebook from **Notebooks** to browse it in the sidebar. Hover over its name to see its full path. Switching notebooks preserves the current note and any unsaved draft.
 - In **Manage Notebooks**, click **Remove** to unregister a notebook. Its files and any open draft are preserved. Removing the active notebook clears the sidebar.
 - Click the folder arrow in the left sidebar to expand it. Subfolders expand recursively.
 - Click a file to edit its Markdown source in the right pane.

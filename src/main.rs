@@ -542,27 +542,6 @@ impl eframe::App for Notes {
                 ui.strong("Rust Note");
                 ui.separator();
                 ui.menu_button("File", |ui| {
-                    ui.menu_button("Notebooks", |ui| {
-                        let mut selected = None;
-                        if self.notebooks.is_empty() {
-                            ui.weak("No notebooks added");
-                        }
-                        for path in &self.notebooks {
-                            ui.push_id(path, |ui| {
-                                if ui
-                                    .selectable_label(self.roots.contains(path), name(path))
-                                    .on_hover_text(path.display().to_string())
-                                    .clicked()
-                                {
-                                    selected = Some(path.clone());
-                                    ui.close_menu();
-                                }
-                            });
-                        }
-                        if let Some(path) = selected {
-                            self.activate_notebook(path);
-                        }
-                    });
                     if ui.button("Manage Notebooks    Ctrl+O").clicked() {
                         ui.close_menu();
                         self.notebooks_open = true;
@@ -578,6 +557,27 @@ impl eframe::App for Notes {
                     if ui.button("Settings…").clicked() {
                         ui.close_menu();
                         self.settings_open = true;
+                    }
+                });
+                ui.menu_button("Notebooks", |ui| {
+                    let mut selected = None;
+                    if self.notebooks.is_empty() {
+                        ui.weak("No notebooks added");
+                    }
+                    for path in &self.notebooks {
+                        ui.push_id(path, |ui| {
+                            if ui
+                                .selectable_label(self.roots.contains(path), name(path))
+                                .on_hover_text(path.display().to_string())
+                                .clicked()
+                            {
+                                selected = Some(path.clone());
+                                ui.close_menu();
+                            }
+                        });
+                    }
+                    if let Some(path) = selected {
+                        self.activate_notebook(path);
                     }
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -631,7 +631,7 @@ impl eframe::App for Notes {
             .show(ctx, |ui| {
                 ui.add_space(12.0);
                 if self.roots.is_empty() {
-                    ui.weak("Choose a notebook from File → Notebooks.");
+                    ui.weak("Choose a notebook from Notebooks.");
                 } else {
                     let actions = self.explorer.show(
                         ui,
