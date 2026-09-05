@@ -533,11 +533,6 @@ impl eframe::App for Notes {
             .width_range(160.0..=500.0)
             .show(ctx, |ui| {
                 ui.add_space(12.0);
-                ui.strong("EXPLORER");
-                ui.add_space(8.0);
-                if ui.button("Add Folder…").clicked() {
-                    self.open_folder();
-                }
                 if self.roots.is_empty() {
                     ui.weak("Add folders to browse your notes.");
                 } else {
@@ -578,7 +573,6 @@ impl eframe::App for Notes {
                         if self.dirty() { " *" } else { "" }
                     ));
                 });
-                ui.weak(path.display().to_string());
                 ui.separator();
                 egui::ScrollArea::vertical()
                     .id_salt((path, self.view))

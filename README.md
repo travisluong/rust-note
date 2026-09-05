@@ -10,7 +10,7 @@ Install the Rust toolchain and your platform's native build tools (on Windows, V
 cargo run
 ```
 
-- Choose **File → Add Folder** (Ctrl+O / Cmd+O), or **Add Folder…** in the sidebar. Select one or more folders; repeated additions keep existing folders and the current note open. Duplicate folders are ignored.
+- Choose **File → Add Folder** (Ctrl+O / Cmd+O). Select one or more folders; repeated additions keep existing folders and the current note open. Duplicate folders are ignored.
 - Right-click a top-level folder and choose **Remove Folder from Sidebar** to remove it from the list. Files on disk and any open draft are preserved.
 - Click the folder arrow in the left sidebar to expand it. Subfolders expand recursively.
 - Click a file to edit its Markdown source in the right pane.
