@@ -151,7 +151,9 @@ enum View {
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 struct Session {
-    root: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    root: Option<PathBuf>, // Legacy single-folder sessions.
+    roots: Vec<PathBuf>,
     file: Option<PathBuf>,
     view: View,
     fonts: FontSettings,
@@ -162,7 +164,7 @@ const SESSION_KEY: &str = "rust-note-session-v1";
 #[derive(Default)]
 struct Notes {
     explorer: explorer::Explorer,
-    root: Option<PathBuf>,
+    roots: Vec<PathBuf>,
     file: Option<PathBuf>,
     text: String,
     saved: String,
@@ -195,18 +197,29 @@ impl Notes {
         } else {
             14.0
         };
-        if let Some(root) = session.root {
+        for root in session.roots.into_iter().chain(session.root) {
             if root.is_dir() {
-                app.root = Some(root.clone());
-                app.explorer.selected = Some(root.clone());
-                if let Some(file) = session.file.filter(|file| file.starts_with(&root)) {
-                    app.open_file(file);
-                    if let Some(file) = &app.file {
-                        app.explorer.reveal(&root, file);
-                    }
-                }
+                app.add_folder(root);
             } else {
                 app.status = format!("Previous folder is unavailable: {}", root.display());
+            }
+        }
+        if let Some(file) = session.file {
+            let folder_status = std::mem::take(&mut app.status);
+            app.open_file(file);
+            if !folder_status.is_empty() {
+                app.status = if app.status.is_empty() {
+                    folder_status
+                } else {
+                    format!("{folder_status}; {}", app.status)
+                };
+            }
+            if let Some(file) = &app.file {
+                for root in &app.roots {
+                    if file.starts_with(root) {
+                        app.explorer.reveal(root, file);
+                    }
+                }
             }
         }
         app
@@ -365,20 +378,27 @@ impl Notes {
         }
     }
 
-    fn open_folder(&mut self) {
-        if let Some(path) = rfd::FileDialog::new()
-            .set_title("Open notes folder")
-            .pick_folder()
-            && self.may_leave()
-        {
-            self.explorer = explorer::Explorer::default();
+    fn add_folder(&mut self, path: PathBuf) {
+        if !self.roots.contains(&path) {
             self.explorer.selected = Some(path.clone());
-            self.root = Some(path);
-            self.file = None;
-            self.live_editor = live::LiveEditor::default();
-            self.text.clear();
-            self.saved.clear();
-            self.status = "Click the folder arrow to browse your notes".into();
+            self.roots.push(path);
+        }
+    }
+
+    fn remove_folder(&mut self, path: &Path) {
+        self.roots.retain(|root| root != path);
+        self.explorer.retain_roots(&self.roots);
+    }
+
+    fn open_folder(&mut self) {
+        if let Some(paths) = rfd::FileDialog::new()
+            .set_title("Add notes folders")
+            .pick_folders()
+        {
+            for path in paths {
+                self.add_folder(path);
+            }
+            self.status = "Click a folder arrow to browse your notes".into();
         }
     }
 
@@ -410,7 +430,8 @@ impl eframe::App for Notes {
             storage,
             SESSION_KEY,
             &Session {
-                root: self.root.clone(),
+                root: None,
+                roots: self.roots.clone(),
                 file: self.file.clone(),
                 view: self.view,
                 fonts: self.fonts.clone(),
@@ -444,7 +465,7 @@ impl eframe::App for Notes {
                 ui.strong("Rust Note");
                 ui.separator();
                 ui.menu_button("File", |ui| {
-                    if ui.button("Open Folder…    Ctrl+O").clicked() {
+                    if ui.button("Add Folder…    Ctrl+O").clicked() {
                         ui.close_menu();
                         self.open_folder();
                     }
@@ -505,6 +526,7 @@ impl eframe::App for Notes {
         });
         let mut clicked = None;
         let mut new_note = None;
+        let mut remove_folder = None;
         egui::SidePanel::left("files")
             .resizable(true)
             .default_width(260.0)
@@ -513,20 +535,25 @@ impl eframe::App for Notes {
                 ui.add_space(12.0);
                 ui.strong("EXPLORER");
                 ui.add_space(8.0);
-                if let Some(root) = &self.root {
-                    (clicked, new_note) = self.explorer.show(
+                if ui.button("Add Folder…").clicked() {
+                    self.open_folder();
+                }
+                if self.roots.is_empty() {
+                    ui.weak("Add folders to browse your notes.");
+                } else {
+                    let actions = self.explorer.show(
                         ui,
-                        root,
+                        &self.roots,
                         self.new_note.is_none() && !self.settings_open,
                     );
-                } else {
-                    ui.weak("Your notes live in a folder.");
-                    ui.add_space(8.0);
-                    if ui.button("Open Folder…").clicked() {
-                        self.open_folder();
-                    }
+                    clicked = actions.open_file;
+                    new_note = actions.new_entry;
+                    remove_folder = actions.remove_folder;
                 }
             });
+        if let Some(path) = remove_folder {
+            self.remove_folder(&path);
+        }
         if let Some(path) = clicked {
             self.open_file(path.clone());
             if self.file.as_ref() != Some(&path) {
@@ -581,7 +608,7 @@ impl eframe::App for Notes {
                         "Open a folder, expand it, and select a Markdown file to start writing.",
                     );
                     ui.add_space(20.0);
-                    if ui.button("Open Folder…").clicked() {
+                    if ui.button("Add Folder…").clicked() {
                         self.open_folder();
                     }
                 });
@@ -609,13 +636,56 @@ mod tests {
     }
 
     #[test]
+    fn multiple_folders_persist_and_removal_preserves_open_draft() {
+        let root = std::env::temp_dir().join(format!("rust-note-multi-{}", std::process::id()));
+        let other = root.join("other");
+        fs::create_dir_all(&other).unwrap();
+        let file = root.join("note.md");
+        fs::write(&file, "Saved").unwrap();
+        let mut app = Notes::default();
+        app.add_folder(root.clone());
+        app.open_file(file.clone());
+        app.text = "Draft".into();
+        app.add_folder(other.clone());
+        app.add_folder(root.clone());
+        assert_eq!(app.roots, vec![root.clone(), other.clone()]);
+        let mut storage = MemoryStorage::default();
+        eframe::App::save(&mut app, &mut storage);
+        assert_eq!(Notes::restore(Some(&storage)).roots, app.roots);
+        app.explorer.reveal(&root, &file);
+        app.remove_folder(&root);
+        assert_eq!(app.roots, vec![other.clone()]);
+        assert!(app.explorer.selected.is_none());
+        assert_eq!(app.file, Some(file.clone()));
+        assert_eq!(app.text, "Draft");
+        assert!(app.dirty());
+        assert_eq!(fs::read_to_string(&file).unwrap(), "Saved");
+        app.remove_folder(&other);
+        eframe::App::save(&mut app, &mut storage);
+        let restored = Notes::restore(Some(&storage));
+        assert!(restored.roots.is_empty());
+        assert_eq!(restored.file, Some(file));
+        // The previous session schema must still restore its single root.
+        eframe::set_value(
+            &mut storage,
+            SESSION_KEY,
+            &Session {
+                root: Some(root.clone()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(Notes::restore(Some(&storage)).roots, vec![root.clone()]);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn session_restores_preferences_and_last_document_from_disk() {
         let root = std::env::temp_dir().join(format!("rust-note-session-{}", std::process::id()));
         fs::create_dir_all(root.join("nested")).unwrap();
         let file = root.join("nested/note.md");
         fs::write(&file, "Saved content").unwrap();
         let mut app = Notes {
-            root: Some(root.clone()),
+            roots: vec![root.clone()],
             file: Some(file.clone()),
             view: View::Live,
             fonts: FontSettings {
@@ -628,7 +698,7 @@ mod tests {
         let mut storage = MemoryStorage::default();
         eframe::App::save(&mut app, &mut storage);
         let restored = Notes::restore(Some(&storage));
-        assert_eq!(restored.root, Some(root.clone()));
+        assert_eq!(restored.roots, vec![root.clone()]);
         assert_eq!(restored.file, Some(file.clone()));
         assert_eq!(restored.explorer.selected, Some(file));
         assert!(restored.view == View::Live);
@@ -638,7 +708,7 @@ mod tests {
         assert!(!restored.dirty());
         fs::remove_dir_all(root).unwrap();
         let restored = Notes::restore(Some(&storage));
-        assert!(restored.root.is_none());
+        assert!(restored.roots.is_empty());
         assert!(restored.status.contains("unavailable"));
         storage.set_string(SESSION_KEY, "invalid data".into());
         assert_eq!(Notes::restore(Some(&storage)).fonts.ui_size, 14.0);

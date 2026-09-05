@@ -42,6 +42,13 @@ fn visible(path: &Path, depth: usize, expanded: &HashSet<PathBuf>, rows: &mut Ve
 }
 
 #[derive(Default)]
+pub struct Actions {
+    pub open_file: Option<PathBuf>,
+    pub new_entry: Option<(PathBuf, bool)>,
+    pub remove_folder: Option<PathBuf>,
+}
+
+#[derive(Default)]
 pub struct Explorer {
     pub selected: Option<PathBuf>,
     expanded: HashSet<PathBuf>,
@@ -49,6 +56,14 @@ pub struct Explorer {
 }
 
 impl Explorer {
+    pub fn retain_roots(&mut self, roots: &[PathBuf]) {
+        let retained = |path: &PathBuf| roots.iter().any(|root| path.starts_with(root));
+        self.expanded.retain(retained);
+        if self.selected.as_ref().is_some_and(|path| !retained(path)) {
+            self.selected = None;
+        }
+    }
+
     pub fn reveal(&mut self, root: &Path, file: &Path) {
         self.selected = Some(file.to_owned());
         for parent in file
@@ -60,6 +75,9 @@ impl Explorer {
         }
     }
     fn navigate(&mut self, rows: &[Row], key: egui::Key) -> Option<PathBuf> {
+        if rows.is_empty() {
+            return None;
+        }
         let index = rows
             .iter()
             .position(|r| Some(&r.path) == self.selected.as_ref());
@@ -87,14 +105,11 @@ impl Explorer {
         (!rows[target].directory).then(|| rows[target].path.clone())
     }
 
-    pub fn show(
-        &mut self,
-        ui: &mut egui::Ui,
-        root: &Path,
-        enabled: bool,
-    ) -> (Option<PathBuf>, Option<(PathBuf, bool)>) {
+    pub fn show(&mut self, ui: &mut egui::Ui, roots: &[PathBuf], enabled: bool) -> Actions {
         let mut rows = Vec::new();
-        visible(root, 0, &self.expanded, &mut rows);
+        for root in roots {
+            visible(root, 0, &self.expanded, &mut rows);
+        }
         if ui.input(|i| {
             i.pointer.any_pressed()
                 && i.pointer
@@ -105,6 +120,7 @@ impl Explorer {
         }
         let mut clicked = None;
         let mut new_entry = None;
+        let mut remove_folder = None;
         let mut scroll = false;
         if self.focused && enabled {
             for key in [
@@ -116,7 +132,9 @@ impl Explorer {
                 if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, key)) {
                     clicked = self.navigate(&rows, key);
                     rows.clear();
-                    visible(root, 0, &self.expanded, &mut rows);
+                    for root in roots {
+                        visible(root, 0, &self.expanded, &mut rows);
+                    }
                     scroll = true;
                 }
             }
@@ -173,12 +191,19 @@ impl Explorer {
                             clicked = Some(row.path.clone());
                         }
                     }
-                    if row.directory {
+                    if row.directory && enabled {
                         response.context_menu(|ui| {
                             for (label, folder) in [("New Note…", false), ("New Folder…", true)]
                             {
                                 if ui.button(label).clicked() {
                                     new_entry = Some((row.path.clone(), folder));
+                                    ui.close_menu();
+                                }
+                            }
+                            if row.depth == 0 {
+                                ui.separator();
+                                if ui.button("Remove Folder from Sidebar").clicked() {
+                                    remove_folder = Some(row.path.clone());
                                     ui.close_menu();
                                 }
                             }
@@ -190,13 +215,36 @@ impl Explorer {
                 }
             }
         });
-        (clicked, new_entry)
+        Actions {
+            open_file: clicked,
+            new_entry,
+            remove_folder,
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn navigation_crosses_roots_without_treating_them_as_parents() {
+        let roots = [PathBuf::from("first"), PathBuf::from("second")];
+        let mut explorer = Explorer::default();
+        let mut rows = Vec::new();
+        for root in &roots {
+            visible(root, 0, &explorer.expanded, &mut rows);
+        }
+        explorer.navigate(&rows, egui::Key::ArrowDown);
+        assert_eq!(explorer.selected, Some(roots[0].clone()));
+        explorer.navigate(&rows, egui::Key::ArrowDown);
+        assert_eq!(explorer.selected, Some(roots[1].clone()));
+        explorer.navigate(&rows, egui::Key::ArrowLeft);
+        assert_eq!(explorer.selected, Some(roots[1].clone()));
+        explorer.navigate(&rows, egui::Key::ArrowUp);
+        assert_eq!(explorer.selected, Some(roots[0].clone()));
+        assert!(explorer.navigate(&[], egui::Key::ArrowDown).is_none());
+    }
+
     #[test]
     fn navigation_follows_visible_order_and_folder_hierarchy() {
         let root = std::env::temp_dir().join(format!("rust-note-nav-{}", std::process::id()));
