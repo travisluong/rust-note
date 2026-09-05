@@ -154,6 +154,7 @@ struct Session {
     #[serde(skip_serializing_if = "Option::is_none")]
     root: Option<PathBuf>, // Legacy single-folder sessions.
     roots: Vec<PathBuf>,
+    notebooks: Vec<PathBuf>,
     file: Option<PathBuf>,
     view: View,
     fonts: FontSettings,
@@ -167,6 +168,7 @@ struct Notes {
     egui_ctx: egui::Context,
     explorer: explorer::Explorer,
     roots: Vec<PathBuf>,
+    notebooks: Vec<PathBuf>,
     file: Option<PathBuf>,
     text: String,
     saved: String,
@@ -176,6 +178,7 @@ struct Notes {
     markdown_cache: CommonMarkCache,
     new_note: Option<NewNote>,
     settings_open: bool,
+    notebooks_open: bool,
     fonts: FontSettings,
 }
 
@@ -206,12 +209,18 @@ impl Notes {
         } else {
             14.0
         };
-        for root in session.roots.into_iter().chain(session.root) {
-            if root.is_dir() {
-                app.add_folder(root);
-            } else {
-                app.status = format!("Previous folder is unavailable: {}", root.display());
+        for path in session
+            .notebooks
+            .into_iter()
+            .chain(session.roots.iter().cloned())
+            .chain(session.root.clone())
+        {
+            if !app.notebooks.contains(&path) {
+                app.notebooks.push(path);
             }
+        }
+        if let Some(path) = session.roots.first().cloned().or(session.root) {
+            app.activate_notebook(path);
         }
         if let Some(file) = session.file {
             let folder_status = std::mem::take(&mut app.status);
@@ -388,26 +397,81 @@ impl Notes {
     }
 
     fn add_folder(&mut self, path: PathBuf) {
-        if !self.roots.contains(&path) {
-            self.explorer.selected = Some(path.clone());
-            self.roots.push(path);
+        if !self.notebooks.contains(&path) {
+            self.notebooks.push(path.clone());
         }
+        self.activate_notebook(path);
+    }
+
+    fn activate_notebook(&mut self, path: PathBuf) {
+        if !path.is_dir() {
+            self.status = format!("Notebook is unavailable: {}", path.display());
+            return;
+        }
+        self.roots = vec![path.clone()];
+        self.explorer = explorer::Explorer::default();
+        self.explorer.open_root(path);
+        self.status.clear();
     }
 
     fn remove_folder(&mut self, path: &Path) {
+        self.notebooks.retain(|root| root != path);
         self.roots.retain(|root| root != path);
         self.explorer.retain_roots(&self.roots);
     }
 
     fn open_folder(&mut self) {
-        if let Some(paths) = rfd::FileDialog::new()
-            .set_title("Add notes folders")
-            .pick_folders()
+        if let Some(path) = rfd::FileDialog::new()
+            .set_title("Open folder as notebook")
+            .pick_folder()
         {
-            for path in paths {
-                self.add_folder(path);
+            self.add_folder(path);
+        }
+    }
+
+    fn notebooks_dialog(&mut self, ctx: &egui::Context) {
+        if !self.notebooks_open {
+            return;
+        }
+        let mut done = false;
+        let mut remove = None;
+        let response = egui::Modal::new(egui::Id::new("notebooks")).show(ctx, |ui| {
+            ui.set_min_width(440.0);
+            ui.heading("Manage Notebooks");
+            if ui.button("Open folder as notebook…").clicked() {
+                self.open_folder();
             }
-            self.status = "Click a folder arrow to browse your notes".into();
+            ui.weak("Removing a notebook keeps its files and any open note.");
+            ui.separator();
+            egui::ScrollArea::vertical()
+                .max_height(320.0)
+                .show(ui, |ui| {
+                    if self.notebooks.is_empty() {
+                        ui.label("No notebooks yet. Choose a folder to get started.");
+                    }
+                    for path in &self.notebooks {
+                        ui.push_id(path, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.strong(name(path));
+                                if self.roots.contains(path) {
+                                    ui.weak("Active");
+                                }
+                                if ui.button("Remove").clicked() {
+                                    remove = Some(path.clone());
+                                }
+                            });
+                            ui.label(path.display().to_string());
+                            ui.separator();
+                        });
+                    }
+                });
+            done = ui.button("Done").clicked();
+        });
+        if let Some(path) = remove {
+            self.remove_folder(&path);
+        }
+        if done || response.should_close() {
+            self.notebooks_open = false;
         }
     }
 
@@ -441,6 +505,7 @@ impl eframe::App for Notes {
             &Session {
                 root: None,
                 roots: self.roots.clone(),
+                notebooks: self.notebooks.clone(),
                 file: self.file.clone(),
                 view: self.view,
                 fonts: self.fonts.clone(),
@@ -459,15 +524,17 @@ impl eframe::App for Notes {
         }
         if self.new_note.is_none()
             && !self.settings_open
+            && !self.notebooks_open
             && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::S))
         {
             self.save();
         }
         if self.new_note.is_none()
             && !self.settings_open
+            && !self.notebooks_open
             && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::O))
         {
-            self.open_folder();
+            self.notebooks_open = true;
         }
 
         egui::TopBottomPanel::top("menu").show(ctx, |ui| {
@@ -475,9 +542,30 @@ impl eframe::App for Notes {
                 ui.strong("Rust Note");
                 ui.separator();
                 ui.menu_button("File", |ui| {
-                    if ui.button("Add Folder…    Ctrl+O").clicked() {
+                    ui.menu_button("Notebooks", |ui| {
+                        let mut selected = None;
+                        if self.notebooks.is_empty() {
+                            ui.weak("No notebooks added");
+                        }
+                        for path in &self.notebooks {
+                            ui.push_id(path, |ui| {
+                                if ui
+                                    .selectable_label(self.roots.contains(path), name(path))
+                                    .on_hover_text(path.display().to_string())
+                                    .clicked()
+                                {
+                                    selected = Some(path.clone());
+                                    ui.close_menu();
+                                }
+                            });
+                        }
+                        if let Some(path) = selected {
+                            self.activate_notebook(path);
+                        }
+                    });
+                    if ui.button("Manage Notebooks    Ctrl+O").clicked() {
                         ui.close_menu();
-                        self.open_folder();
+                        self.notebooks_open = true;
                     }
                     if ui
                         .add_enabled(self.file.is_some(), egui::Button::new("Save    Ctrl+S"))
@@ -536,7 +624,6 @@ impl eframe::App for Notes {
         });
         let mut clicked = None;
         let mut new_note = None;
-        let mut remove_folder = None;
         egui::SidePanel::left("files")
             .resizable(true)
             .default_width(260.0)
@@ -544,21 +631,17 @@ impl eframe::App for Notes {
             .show(ctx, |ui| {
                 ui.add_space(12.0);
                 if self.roots.is_empty() {
-                    ui.weak("Add folders to browse your notes.");
+                    ui.weak("Choose a notebook from File → Notebooks.");
                 } else {
                     let actions = self.explorer.show(
                         ui,
                         &self.roots,
-                        self.new_note.is_none() && !self.settings_open,
+                        self.new_note.is_none() && !self.settings_open && !self.notebooks_open,
                     );
                     clicked = actions.open_file;
                     new_note = actions.new_entry;
-                    remove_folder = actions.remove_folder;
                 }
             });
-        if let Some(path) = remove_folder {
-            self.remove_folder(&path);
-        }
         if let Some(path) = clicked {
             self.open_file(path.clone());
             if self.file.as_ref() != Some(&path) {
@@ -609,17 +692,18 @@ impl eframe::App for Notes {
                     ui.heading("A little space for your thoughts.");
                     ui.add_space(12.0);
                     ui.weak(
-                        "Open a folder, expand it, and select a Markdown file to start writing.",
+                        "Open a folder as a notebook, then select a Markdown file to start writing.",
                     );
                     ui.add_space(20.0);
-                    if ui.button("Add Folder…").clicked() {
-                        self.open_folder();
+                    if ui.button("Manage Notebooks").clicked() {
+                        self.notebooks_open = true;
                     }
                 });
             }
         });
         self.new_note_dialog(ctx);
         self.settings_dialog(ctx);
+        self.notebooks_dialog(ctx);
     }
 }
 
@@ -686,7 +770,7 @@ mod tests {
     }
 
     #[test]
-    fn multiple_folders_persist_and_removal_preserves_open_draft() {
+    fn notebooks_persist_and_removal_preserves_open_draft() {
         let root = std::env::temp_dir().join(format!("rust-note-multi-{}", std::process::id()));
         let other = root.join("other");
         fs::create_dir_all(&other).unwrap();
@@ -698,16 +782,22 @@ mod tests {
         app.text = "Draft".into();
         app.add_folder(other.clone());
         app.add_folder(root.clone());
-        assert_eq!(app.roots, vec![root.clone(), other.clone()]);
+        assert_eq!(app.notebooks, vec![root.clone(), other.clone()]);
+        assert_eq!(app.roots, vec![root.clone()]);
         let mut storage = MemoryStorage::default();
         eframe::App::save(&mut app, &mut storage);
         assert_eq!(
             Notes::restore(Some(&storage), egui::Context::default()).roots,
             app.roots
         );
+        assert_eq!(
+            Notes::restore(Some(&storage), egui::Context::default()).notebooks,
+            app.notebooks
+        );
         app.explorer.reveal(&root, &file);
         app.remove_folder(&root);
-        assert_eq!(app.roots, vec![other.clone()]);
+        assert!(app.roots.is_empty());
+        assert_eq!(app.notebooks, vec![other.clone()]);
         assert!(app.explorer.selected.is_none());
         assert_eq!(app.file, Some(file.clone()));
         assert_eq!(app.text, "Draft");
@@ -732,6 +822,32 @@ mod tests {
             vec![root.clone()]
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn legacy_folders_migrate_and_unavailable_selection_preserves_sidebar() {
+        let root = std::env::temp_dir();
+        let missing = root.join(format!("rust-note-unavailable-{}", std::process::id()));
+        let mut storage = MemoryStorage::default();
+        eframe::set_value(
+            &mut storage,
+            SESSION_KEY,
+            &Session {
+                roots: vec![root.clone(), missing.clone(), root.clone()],
+                ..Default::default()
+            },
+        );
+        let mut app = Notes::restore(Some(&storage), egui::Context::default());
+        assert_eq!(app.notebooks, vec![root.clone(), missing.clone()]);
+        assert_eq!(app.roots, vec![root.clone()]);
+        app.activate_notebook(missing.clone());
+        assert_eq!(app.roots, vec![root.clone()]);
+        assert!(app.status.contains("unavailable"));
+        app.remove_folder(&root);
+        eframe::App::save(&mut app, &mut storage);
+        let restored = Notes::restore(Some(&storage), egui::Context::default());
+        assert_eq!(restored.notebooks, vec![missing]);
+        assert!(restored.roots.is_empty());
     }
 
     #[test]
@@ -762,9 +878,10 @@ mod tests {
         assert_eq!(restored.fonts.content_size, 26.0);
         assert_eq!(restored.text, "Saved content");
         assert!(!restored.dirty());
-        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(&root).unwrap();
         let restored = Notes::restore(Some(&storage), egui::Context::default());
         assert!(restored.roots.is_empty());
+        assert_eq!(restored.notebooks, vec![root.clone()]);
         assert!(restored.status.contains("unavailable"));
         storage.set_string(SESSION_KEY, "invalid data".into());
         assert_eq!(

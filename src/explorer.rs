@@ -45,7 +45,6 @@ fn visible(path: &Path, depth: usize, expanded: &HashSet<PathBuf>, rows: &mut Ve
 pub struct Actions {
     pub open_file: Option<PathBuf>,
     pub new_entry: Option<(PathBuf, bool)>,
-    pub remove_folder: Option<PathBuf>,
 }
 
 #[derive(Default)]
@@ -56,6 +55,10 @@ pub struct Explorer {
 }
 
 impl Explorer {
+    pub fn open_root(&mut self, path: PathBuf) {
+        self.expanded.insert(path.clone());
+        self.selected = Some(path);
+    }
     pub fn retain_roots(&mut self, roots: &[PathBuf]) {
         let retained = |path: &PathBuf| roots.iter().any(|root| path.starts_with(root));
         self.expanded.retain(retained);
@@ -120,7 +123,6 @@ impl Explorer {
         }
         let mut clicked = None;
         let mut new_entry = None;
-        let mut remove_folder = None;
         let mut scroll = false;
         if self.focused && enabled {
             for key in [
@@ -200,13 +202,6 @@ impl Explorer {
                                     ui.close_menu();
                                 }
                             }
-                            if row.depth == 0 {
-                                ui.separator();
-                                if ui.button("Remove Folder from Sidebar").clicked() {
-                                    remove_folder = Some(row.path.clone());
-                                    ui.close_menu();
-                                }
-                            }
                         });
                     }
                 });
@@ -218,7 +213,6 @@ impl Explorer {
         Actions {
             open_file: clicked,
             new_entry,
-            remove_folder,
         }
     }
 }
