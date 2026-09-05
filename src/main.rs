@@ -106,6 +106,52 @@ fn create_note(folder: &Path, filename: &str) -> Result<PathBuf, String> {
     Ok(path)
 }
 
+fn moved_path(path: &Path, source: &Path, destination: &Path) -> PathBuf {
+    path.strip_prefix(source)
+        .map(|suffix| {
+            if suffix.as_os_str().is_empty() {
+                destination.to_owned()
+            } else {
+                destination.join(suffix)
+            }
+        })
+        .unwrap_or_else(|_| path.to_owned())
+}
+
+fn move_entry(root: &Path, source: &Path, folder: &Path) -> Result<PathBuf, String> {
+    let resolve =
+        |path: &Path| fs::canonicalize(path).map_err(|e| format!("Cannot move item: {e}"));
+    let real_root = resolve(root)?;
+    let real_source = resolve(source)?;
+    let real_folder = resolve(folder)?;
+    if real_source == real_root
+        || !real_source.starts_with(&real_root)
+        || !real_folder.starts_with(&real_root)
+    {
+        return Err("Items must stay inside the active notebook.".into());
+    }
+    if !real_folder.is_dir() {
+        return Err("Drop onto a folder.".into());
+    }
+    if real_folder.starts_with(&real_source) {
+        return Err("A folder cannot be moved into itself or one of its subfolders.".into());
+    }
+    if real_source.parent() == Some(real_folder.as_path()) {
+        return Err("This item is already in that folder.".into());
+    }
+    let filename = source.file_name().ok_or("Cannot move this item.")?;
+    let destination = folder.join(filename);
+    match fs::symlink_metadata(&destination) {
+        Ok(_) => {
+            return Err("An item with that name already exists in the destination folder.".into());
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("Cannot check destination: {error}")),
+    }
+    fs::rename(source, &destination).map_err(|error| format!("Could not move item: {error}"))?;
+    Ok(destination)
+}
+
 struct NewNote {
     is_folder: bool,
     folder: PathBuf,
@@ -475,6 +521,28 @@ impl Notes {
         }
     }
 
+    fn move_item(&mut self, source: PathBuf, folder: PathBuf) {
+        let Some(root) = self.roots.first() else {
+            return;
+        };
+        match move_entry(root, &source, &folder) {
+            Ok(destination) => {
+                if let Some(file) = &mut self.file {
+                    *file = moved_path(file, &source, &destination);
+                }
+                for notebook in &mut self.notebooks {
+                    *notebook = moved_path(notebook, &source, &destination);
+                }
+                if let Some(draft) = &mut self.new_note {
+                    draft.folder = moved_path(&draft.folder, &source, &destination);
+                }
+                self.explorer.item_moved(&source, &destination);
+                self.status = format!("Moved {} to {}", name(&source), folder.display());
+            }
+            Err(error) => self.status = error,
+        }
+    }
+
     fn open_file(&mut self, path: PathBuf) {
         if self.file.as_ref() == Some(&path) {
             return;
@@ -645,6 +713,7 @@ impl eframe::App for Notes {
                 }
             });
         });
+        let mut moved = None;
         let mut clicked = None;
         let mut new_note = None;
         egui::SidePanel::left("files")
@@ -661,10 +730,14 @@ impl eframe::App for Notes {
                         &self.roots,
                         self.new_note.is_none() && !self.settings_open && !self.notebooks_open,
                     );
+                    moved = actions.move_entry;
                     clicked = actions.open_file;
                     new_note = actions.new_entry;
                 }
             });
+        if let Some((source, folder)) = moved {
+            self.move_item(source, folder);
+        }
         if let Some(path) = clicked {
             self.open_file(path.clone());
             if self.file.as_ref() != Some(&path) {
@@ -744,6 +817,69 @@ mod tests {
             self.0.insert(key.into(), value);
         }
         fn flush(&mut self) {}
+    }
+
+    #[test]
+    fn moves_files_and_folders_preserving_drafts_and_registered_paths() {
+        let root = std::env::temp_dir().join(format!("rust-note-move-{}", std::process::id()));
+        let source = root.join("source");
+        let target = root.join("target");
+        fs::create_dir_all(source.join("nested")).unwrap();
+        fs::create_dir_all(&target).unwrap();
+        let file = source.join("nested/note.md");
+        fs::write(&file, "Saved").unwrap();
+        let mut app = Notes::default();
+        app.add_folder(source.clone());
+        app.add_folder(root.clone());
+        app.open_file(file.clone());
+        app.text = "Unsaved draft".into();
+        app.explorer.reveal(&root, &file);
+        app.move_item(source.clone(), target.clone());
+        let moved = target.join("source/nested/note.md");
+        assert!(!source.exists());
+        assert_eq!(app.file, Some(moved.clone()));
+        assert_eq!(app.explorer.selected, Some(moved.clone()));
+        assert!(app.notebooks.contains(&target.join("source")));
+        assert_eq!(app.text, "Unsaved draft");
+        assert!(app.dirty());
+        assert_eq!(fs::read_to_string(&moved).unwrap(), "Saved");
+        app.move_item(moved.clone(), root.clone());
+        assert_eq!(app.file, Some(root.join("note.md")));
+        assert!(!moved.exists());
+        assert!(app.save());
+        assert_eq!(
+            fs::read_to_string(root.join("note.md")).unwrap(),
+            "Unsaved draft"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn invalid_moves_preserve_sources_and_destinations() {
+        let root =
+            std::env::temp_dir().join(format!("rust-note-move-invalid-{}", std::process::id()));
+        let source = root.join("source");
+        let target = root.join("target");
+        fs::create_dir_all(source.join("nested")).unwrap();
+        fs::create_dir_all(&target).unwrap();
+        let file = source.join("note.md");
+        fs::write(&file, "Source").unwrap();
+        fs::write(target.join("note.md"), "Destination").unwrap();
+        assert!(move_entry(&root, &file, &target).is_err());
+        assert!(move_entry(&root, &source, &source).is_err());
+        assert!(move_entry(&root, &source, &source.join("nested")).is_err());
+        assert!(move_entry(&root, &source, &root).is_err());
+        assert!(move_entry(&root, &root, &target).is_err());
+        assert!(move_entry(&root, &file, &root.join("missing")).is_err());
+        assert!(move_entry(&root, &file, &std::env::temp_dir()).is_err());
+        assert!(move_entry(&root, &file, &target.join("note.md")).is_err());
+        assert_eq!(fs::read_to_string(&file).unwrap(), "Source");
+        assert_eq!(
+            fs::read_to_string(target.join("note.md")).unwrap(),
+            "Destination"
+        );
+        assert!(source.join("nested").is_dir());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

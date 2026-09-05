@@ -69,6 +69,7 @@ fn notebook_rows(roots: &[PathBuf], expanded: &HashSet<PathBuf>) -> (Vec<Row>, V
 #[derive(Default)]
 pub struct Actions {
     pub open_file: Option<PathBuf>,
+    pub move_entry: Option<(PathBuf, PathBuf)>,
     pub new_entry: Option<(PathBuf, bool)>,
 }
 
@@ -80,6 +81,20 @@ pub struct Explorer {
 }
 
 impl Explorer {
+    pub fn item_moved(&mut self, source: &Path, destination: &Path) {
+        self.expanded = self
+            .expanded
+            .iter()
+            .map(|path| crate::moved_path(path, source, destination))
+            .collect();
+        if let Some(path) = &mut self.selected {
+            *path = crate::moved_path(path, source, destination);
+        }
+        if let Some(parent) = destination.parent() {
+            self.expanded.insert(parent.to_owned());
+        }
+    }
+
     pub fn open_root(&mut self, path: PathBuf) {
         self.expanded.insert(path.clone());
         self.selected = None;
@@ -143,6 +158,7 @@ impl Explorer {
         }) {
             self.focused = false;
         }
+        let mut moved = None;
         let mut clicked = None;
         let mut new_entry = None;
         let mut scroll = false;
@@ -158,6 +174,22 @@ impl Explorer {
                     (rows, errors) = notebook_rows(roots, &self.expanded);
                     scroll = true;
                 }
+            }
+        }
+        if enabled
+            && egui::DragAndDrop::has_payload_of_type::<PathBuf>(ui.ctx())
+            && let Some(root) = roots.first()
+        {
+            let response = ui.label("Drop here to move to notebook root");
+            if response.dnd_hover_payload::<PathBuf>().is_some() {
+                ui.painter().rect_filled(
+                    response.rect,
+                    2.0,
+                    ui.visuals().selection.bg_fill.linear_multiply(0.4),
+                );
+            }
+            if let Some(source) = response.dnd_release_payload::<PathBuf>() {
+                moved = Some(((*source).clone(), root.clone()));
             }
         }
         egui::ScrollArea::both().show(ui, |ui| {
@@ -203,6 +235,22 @@ impl Explorer {
                     if let Some(arrow) = arrow {
                         response = response.union(arrow);
                     }
+                    if enabled {
+                        response = response.interact(egui::Sense::click_and_drag());
+                        response.dnd_set_drag_payload(row.path.clone());
+                        if row.directory {
+                            if response.dnd_hover_payload::<PathBuf>().is_some() {
+                                ui.painter().rect_filled(
+                                    response.rect,
+                                    2.0,
+                                    ui.visuals().selection.bg_fill.linear_multiply(0.4),
+                                );
+                            }
+                            if let Some(source) = response.dnd_release_payload::<PathBuf>() {
+                                moved = Some(((*source).clone(), row.path.clone()));
+                            }
+                        }
+                    }
                     if scroll && self.selected.as_ref() == Some(&row.path) {
                         response.scroll_to_me(None);
                     }
@@ -237,6 +285,7 @@ impl Explorer {
         });
         Actions {
             open_file: clicked,
+            move_entry: moved,
             new_entry,
         }
     }
