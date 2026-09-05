@@ -226,10 +226,8 @@ impl Explorer {
                         response.dnd_set_drag_payload(row.path.clone());
                         let destination = if row.directory {
                             Some(row.path.as_path())
-                        } else if row.depth == 0 {
-                            row.path.parent()
                         } else {
-                            None
+                            row.path.parent()
                         };
                         if let Some(destination) = destination {
                             if response.dnd_hover_payload::<PathBuf>().is_some() {
