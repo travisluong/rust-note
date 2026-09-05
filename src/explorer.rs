@@ -115,21 +115,39 @@ impl Explorer {
             for row in &rows {
                 ui.horizontal(|ui| {
                     ui.add_space(row.depth as f32 * 16.0);
-                    let label = if row.directory {
-                        format!(
-                            "{} {}",
-                            if self.expanded.contains(&row.path) {
-                                "▾"
-                            } else {
-                                "▸"
-                            },
-                            name(&row.path)
-                        )
-                    } else {
-                        name(&row.path)
-                    };
-                    let response =
-                        ui.selectable_label(self.selected.as_ref() == Some(&row.path), label);
+                    let arrow = row.directory.then(|| {
+                        let size = ui.text_style_height(&egui::TextStyle::Body);
+                        let (rect, response) =
+                            ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::click());
+                        let center = rect.center();
+                        let radius = size * 0.28;
+                        let points = if self.expanded.contains(&row.path) {
+                            vec![
+                                center + egui::vec2(-radius, -radius * 0.5),
+                                center + egui::vec2(radius, -radius * 0.5),
+                                center + egui::vec2(0.0, radius),
+                            ]
+                        } else {
+                            vec![
+                                center + egui::vec2(-radius * 0.5, -radius),
+                                center + egui::vec2(radius, 0.0),
+                                center + egui::vec2(-radius * 0.5, radius),
+                            ]
+                        };
+                        ui.painter().add(egui::Shape::convex_polygon(
+                            points,
+                            ui.visuals().text_color(),
+                            egui::Stroke::NONE,
+                        ));
+                        response
+                    });
+                    let mut response = ui.selectable_label(
+                        self.selected.as_ref() == Some(&row.path),
+                        name(&row.path),
+                    );
+                    if let Some(arrow) = arrow {
+                        response = response.union(arrow);
+                    }
                     if scroll && self.selected.as_ref() == Some(&row.path) {
                         response.scroll_to_me(None);
                     }
