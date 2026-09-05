@@ -58,7 +58,7 @@ fn tree(
     path: &Path,
     selected: Option<&Path>,
     clicked: &mut Option<PathBuf>,
-    new_note: &mut Option<PathBuf>,
+    new_note: &mut Option<(PathBuf, bool)>,
 ) {
     egui::CollapsingHeader::new(name(path))
         .id_salt(path)
@@ -90,13 +90,17 @@ fn tree(
         .header_response
         .context_menu(|ui| {
             if ui.button("New Note…").clicked() {
-                *new_note = Some(path.to_path_buf());
+                *new_note = Some((path.to_path_buf(), false));
+                ui.close_menu();
+            }
+            if ui.button("New Folder…").clicked() {
+                *new_note = Some((path.to_path_buf(), true));
                 ui.close_menu();
             }
         });
 }
 
-fn create_note(folder: &Path, filename: &str) -> Result<PathBuf, String> {
+fn validate_name(filename: &str) -> Result<&str, String> {
     let filename = filename.trim();
     if filename.is_empty()
         || filename == "."
@@ -106,8 +110,25 @@ fn create_note(folder: &Path, filename: &str) -> Result<PathBuf, String> {
             .chars()
             .any(|c| c.is_control() || "<>:\"/\\|?*".contains(c))
     {
-        return Err("Enter a valid file name without folders or special characters.".into());
+        return Err("Enter a valid name without path separators or special characters.".into());
     }
+    Ok(filename)
+}
+
+fn create_folder(parent: &Path, folder_name: &str) -> Result<PathBuf, String> {
+    let path = parent.join(validate_name(folder_name)?);
+    fs::create_dir(&path).map_err(|error| {
+        if error.kind() == io::ErrorKind::AlreadyExists {
+            "A file or folder with that name already exists. Choose another name.".into()
+        } else {
+            format!("Could not create folder: {error}")
+        }
+    })?;
+    Ok(path)
+}
+
+fn create_note(folder: &Path, filename: &str) -> Result<PathBuf, String> {
+    let filename = validate_name(filename)?;
     let filename = if Path::new(filename).extension().is_none() {
         format!("{filename}.md")
     } else {
@@ -129,6 +150,7 @@ fn create_note(folder: &Path, filename: &str) -> Result<PathBuf, String> {
 }
 
 struct NewNote {
+    is_folder: bool,
     folder: PathBuf,
     filename: String,
     error: String,
@@ -237,16 +259,31 @@ impl Notes {
         let mut cancel = false;
         let response = egui::Modal::new(egui::Id::new("new_note")).show(ctx, |ui| {
             ui.set_min_width(360.0);
-            ui.heading("New Note");
+            ui.heading(if draft.is_folder {
+                "New Folder"
+            } else {
+                "New Note"
+            });
             ui.label(format!("Create in {}", draft.folder.display()));
-            ui.label("File name");
-            let input =
-                ui.add(egui::TextEdit::singleline(&mut draft.filename).hint_text("Untitled.md"));
+            ui.label(if draft.is_folder {
+                "Folder name"
+            } else {
+                "File name"
+            });
+            let input = ui.add(egui::TextEdit::singleline(&mut draft.filename).hint_text(
+                if draft.is_folder {
+                    "New folder"
+                } else {
+                    "Untitled.md"
+                },
+            ));
             if draft.focus {
                 input.request_focus();
                 draft.focus = false;
             }
-            ui.weak("Names without an extension get .md automatically.");
+            if !draft.is_folder {
+                ui.weak("Names without an extension get .md automatically.");
+            }
             if !draft.error.is_empty() {
                 ui.colored_label(egui::Color32::LIGHT_RED, &draft.error);
             }
@@ -259,7 +296,15 @@ impl Notes {
         if cancel || response.should_close() {
             return;
         }
-        if create && self.may_leave() {
+        if create && draft.is_folder {
+            match create_folder(&draft.folder, &draft.filename) {
+                Ok(path) => {
+                    self.status = format!("Folder created: {}", name(&path));
+                    return;
+                }
+                Err(error) => draft.error = error,
+            }
+        } else if create && self.may_leave() {
             match create_note(&draft.folder, &draft.filename) {
                 Ok(path) => {
                     self.file = Some(path);
@@ -457,8 +502,9 @@ impl eframe::App for Notes {
         if let Some(path) = clicked {
             self.open_file(path);
         }
-        if let Some(folder) = new_note {
+        if let Some((folder, is_folder)) = new_note {
             self.new_note = Some(NewNote {
+                is_folder,
                 folder,
                 filename: String::new(),
                 error: String::new(),
@@ -518,6 +564,27 @@ impl eframe::App for Notes {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn create_subfolder_rejects_collisions_and_invalid_paths() {
+        let root =
+            std::env::temp_dir().join(format!("rust-note-folder-test-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let folder = create_folder(&root, "Projects").unwrap();
+        assert!(folder.is_dir());
+        assert!(create_folder(&folder, "Nested").unwrap().is_dir());
+        assert!(create_folder(&root, "Projects").is_err());
+        fs::write(root.join("existing"), "Preserve me").unwrap();
+        assert!(create_folder(&root, "existing").is_err());
+        assert_eq!(
+            fs::read_to_string(root.join("existing")).unwrap(),
+            "Preserve me"
+        );
+        for invalid in ["", "  ", "..", "../escape", "a/b", "a\\b", "C:folder"] {
+            assert!(create_folder(&root, invalid).is_err());
+        }
+        assert!(create_folder(&root.join("missing"), "child").is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn create_note_in_subfolder_without_overwriting_existing_files() {
         let root =
