@@ -134,6 +134,30 @@ struct NewNote {
     focus: bool,
 }
 
+struct FontSettings {
+    ui_size: f32,
+    content_size: f32,
+}
+
+impl Default for FontSettings {
+    fn default() -> Self {
+        Self {
+            ui_size: 14.0,
+            content_size: 14.0,
+        }
+    }
+}
+
+fn set_font_size(style: &mut egui::Style, size: f32) {
+    for (text_style, font) in &mut style.text_styles {
+        font.size = match text_style {
+            egui::TextStyle::Small => size * 10.0 / 14.0,
+            egui::TextStyle::Heading => size * 20.0 / 14.0,
+            _ => size,
+        };
+    }
+}
+
 #[derive(Default)]
 struct Notes {
     root: Option<PathBuf>,
@@ -144,9 +168,57 @@ struct Notes {
     read_mode: bool,
     markdown_cache: CommonMarkCache,
     new_note: Option<NewNote>,
+    settings_open: bool,
+    fonts: FontSettings,
 }
 
 impl Notes {
+    fn settings_dialog(&mut self, ctx: &egui::Context) {
+        if !self.settings_open {
+            return;
+        }
+        let mut done = false;
+        let response = egui::Modal::new(egui::Id::new("settings")).show(ctx, |ui| {
+            ui.set_min_width(360.0);
+            ui.heading("Settings");
+            ui.label("UI font size");
+            let mut changed = ui
+                .add(
+                    egui::Slider::new(&mut self.fonts.ui_size, 10.0..=28.0)
+                        .suffix(" pt")
+                        .step_by(1.0),
+                )
+                .changed();
+            ui.weak("Menus, sidebar, and dialogs");
+            ui.add_space(12.0);
+            ui.label("Content font size");
+            changed |= ui
+                .add(
+                    egui::Slider::new(&mut self.fonts.content_size, 10.0..=40.0)
+                        .suffix(" pt")
+                        .step_by(1.0),
+                )
+                .changed();
+            ui.weak("Markdown editor and read mode");
+            ui.add_space(12.0);
+            ui.label("Changes apply immediately for this session.");
+            ui.horizontal(|ui| {
+                if ui.button("Reset defaults").clicked() {
+                    self.fonts = FontSettings::default();
+                    changed = true;
+                }
+                done = ui.button("Done").clicked();
+            });
+            if changed {
+                ctx.style_mut(|style| set_font_size(style, self.fonts.ui_size));
+                ctx.request_repaint();
+            }
+        });
+        if done || response.should_close() {
+            self.settings_open = false;
+        }
+    }
+
     fn new_note_dialog(&mut self, ctx: &egui::Context) {
         let Some(mut draft) = self.new_note.take() else {
             return;
@@ -271,11 +343,13 @@ impl eframe::App for Notes {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
         }
         if self.new_note.is_none()
+            && !self.settings_open
             && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::S))
         {
             self.save();
         }
         if self.new_note.is_none()
+            && !self.settings_open
             && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::O))
         {
             self.open_folder();
@@ -296,6 +370,11 @@ impl eframe::App for Notes {
                     {
                         ui.close_menu();
                         self.save();
+                    }
+                    ui.separator();
+                    if ui.button("Settings…").clicked() {
+                        ui.close_menu();
+                        self.settings_open = true;
                     }
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -378,6 +457,7 @@ impl eframe::App for Notes {
                 egui::ScrollArea::vertical()
                     .id_salt((path, self.read_mode))
                     .show(ui, |ui| {
+                        set_font_size(ui.style_mut(), self.fonts.content_size);
                         if self.read_mode {
                             CommonMarkViewer::new().show(ui, &mut self.markdown_cache, &self.text);
                         } else {
@@ -407,6 +487,7 @@ impl eframe::App for Notes {
             }
         });
         self.new_note_dialog(ctx);
+        self.settings_dialog(ctx);
     }
 }
 
