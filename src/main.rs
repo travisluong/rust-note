@@ -20,7 +20,7 @@ fn main() -> eframe::Result {
         },
         Box::new(|cc| {
             cc.egui_ctx.set_visuals(egui::Visuals::dark());
-            let app = Notes::restore(cc.storage);
+            let app = Notes::restore(cc.storage, cc.egui_ctx.clone());
             cc.egui_ctx
                 .style_mut(|style| set_font_size(style, app.fonts.ui_size));
             Ok(Box::new(app))
@@ -157,12 +157,14 @@ struct Session {
     file: Option<PathBuf>,
     view: View,
     fonts: FontSettings,
+    zoom_factor: Option<f32>,
 }
 
 const SESSION_KEY: &str = "rust-note-session-v1";
 
 #[derive(Default)]
 struct Notes {
+    egui_ctx: egui::Context,
     explorer: explorer::Explorer,
     roots: Vec<PathBuf>,
     file: Option<PathBuf>,
@@ -178,11 +180,18 @@ struct Notes {
 }
 
 impl Notes {
-    fn restore(storage: Option<&dyn eframe::Storage>) -> Self {
+    fn restore(storage: Option<&dyn eframe::Storage>, egui_ctx: egui::Context) -> Self {
         let session: Session = storage
             .and_then(|s| eframe::get_value(s, SESSION_KEY))
             .unwrap_or_default();
+        let zoom_factor = session
+            .zoom_factor
+            .filter(|zoom| zoom.is_finite() && *zoom > 0.0)
+            .unwrap_or(1.0)
+            .clamp(0.2, 5.0);
+        egui_ctx.set_zoom_factor(zoom_factor);
         let mut app = Self {
+            egui_ctx,
             view: session.view,
             fonts: session.fonts,
             ..Default::default()
@@ -435,6 +444,7 @@ impl eframe::App for Notes {
                 file: self.file.clone(),
                 view: self.view,
                 fonts: self.fonts.clone(),
+                zoom_factor: Some(self.egui_ctx.zoom_factor()),
             },
         );
     }
@@ -630,6 +640,52 @@ mod tests {
     }
 
     #[test]
+    fn zoom_persists_from_context_and_restores_at_startup() {
+        let mut app = Notes::default();
+        app.egui_ctx.set_zoom_factor(1.7);
+        let _ = app.egui_ctx.run(Default::default(), |_| {});
+        let mut storage = MemoryStorage::default();
+        eframe::App::save(&mut app, &mut storage);
+        let ctx = egui::Context::default();
+        let _restored = Notes::restore(Some(&storage), ctx.clone());
+        let _ = ctx.run(Default::default(), |_| {});
+        assert_eq!(ctx.zoom_factor(), 1.7);
+    }
+
+    #[test]
+    fn zoom_defaults_for_old_sessions_and_validates_saved_values() {
+        let mut storage = MemoryStorage::default();
+        storage.set_string(
+            SESSION_KEY,
+            "(view:Read,fonts:(ui_size:20.0,content_size:26.0))".into(),
+        );
+        let app = Notes::restore(Some(&storage), egui::Context::default());
+        let _ = app.egui_ctx.run(Default::default(), |_| {});
+        assert_eq!(app.egui_ctx.zoom_factor(), 1.0);
+        assert_eq!(app.fonts.ui_size, 20.0);
+        for (zoom, expected) in [
+            (0.0, 1.0),
+            (-1.0, 1.0),
+            (f32::NAN, 1.0),
+            (f32::INFINITY, 1.0),
+            (0.1, 0.2),
+            (10.0, 5.0),
+        ] {
+            eframe::set_value(
+                &mut storage,
+                SESSION_KEY,
+                &Session {
+                    zoom_factor: Some(zoom),
+                    ..Default::default()
+                },
+            );
+            let app = Notes::restore(Some(&storage), egui::Context::default());
+            let _ = app.egui_ctx.run(Default::default(), |_| {});
+            assert_eq!(app.egui_ctx.zoom_factor(), expected);
+        }
+    }
+
+    #[test]
     fn multiple_folders_persist_and_removal_preserves_open_draft() {
         let root = std::env::temp_dir().join(format!("rust-note-multi-{}", std::process::id()));
         let other = root.join("other");
@@ -645,7 +701,10 @@ mod tests {
         assert_eq!(app.roots, vec![root.clone(), other.clone()]);
         let mut storage = MemoryStorage::default();
         eframe::App::save(&mut app, &mut storage);
-        assert_eq!(Notes::restore(Some(&storage)).roots, app.roots);
+        assert_eq!(
+            Notes::restore(Some(&storage), egui::Context::default()).roots,
+            app.roots
+        );
         app.explorer.reveal(&root, &file);
         app.remove_folder(&root);
         assert_eq!(app.roots, vec![other.clone()]);
@@ -656,7 +715,7 @@ mod tests {
         assert_eq!(fs::read_to_string(&file).unwrap(), "Saved");
         app.remove_folder(&other);
         eframe::App::save(&mut app, &mut storage);
-        let restored = Notes::restore(Some(&storage));
+        let restored = Notes::restore(Some(&storage), egui::Context::default());
         assert!(restored.roots.is_empty());
         assert_eq!(restored.file, Some(file));
         // The previous session schema must still restore its single root.
@@ -668,7 +727,10 @@ mod tests {
                 ..Default::default()
             },
         );
-        assert_eq!(Notes::restore(Some(&storage)).roots, vec![root.clone()]);
+        assert_eq!(
+            Notes::restore(Some(&storage), egui::Context::default()).roots,
+            vec![root.clone()]
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -691,7 +753,7 @@ mod tests {
         };
         let mut storage = MemoryStorage::default();
         eframe::App::save(&mut app, &mut storage);
-        let restored = Notes::restore(Some(&storage));
+        let restored = Notes::restore(Some(&storage), egui::Context::default());
         assert_eq!(restored.roots, vec![root.clone()]);
         assert_eq!(restored.file, Some(file.clone()));
         assert_eq!(restored.explorer.selected, Some(file));
@@ -701,11 +763,16 @@ mod tests {
         assert_eq!(restored.text, "Saved content");
         assert!(!restored.dirty());
         fs::remove_dir_all(root).unwrap();
-        let restored = Notes::restore(Some(&storage));
+        let restored = Notes::restore(Some(&storage), egui::Context::default());
         assert!(restored.roots.is_empty());
         assert!(restored.status.contains("unavailable"));
         storage.set_string(SESSION_KEY, "invalid data".into());
-        assert_eq!(Notes::restore(Some(&storage)).fonts.ui_size, 14.0);
+        assert_eq!(
+            Notes::restore(Some(&storage), egui::Context::default())
+                .fonts
+                .ui_size,
+            14.0
+        );
     }
     #[test]
     fn create_subfolder_rejects_collisions_and_invalid_paths() {
