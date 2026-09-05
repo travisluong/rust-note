@@ -49,6 +49,16 @@ pub struct Explorer {
 }
 
 impl Explorer {
+    pub fn reveal(&mut self, root: &Path, file: &Path) {
+        self.selected = Some(file.to_owned());
+        for parent in file
+            .ancestors()
+            .skip(1)
+            .take_while(|parent| parent.starts_with(root))
+        {
+            self.expanded.insert(parent.to_owned());
+        }
+    }
     fn navigate(&mut self, rows: &[Row], key: egui::Key) -> Option<PathBuf> {
         let index = rows
             .iter()

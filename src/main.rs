@@ -20,7 +20,10 @@ fn main() -> eframe::Result {
         },
         Box::new(|cc| {
             cc.egui_ctx.set_visuals(egui::Visuals::dark());
-            Ok(Box::<Notes>::default())
+            let app = Notes::restore(cc.storage);
+            cc.egui_ctx
+                .style_mut(|style| set_font_size(style, app.fonts.ui_size));
+            Ok(Box::new(app))
         }),
     )
 }
@@ -111,6 +114,8 @@ struct NewNote {
     focus: bool,
 }
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 struct FontSettings {
     ui_size: f32,
     content_size: f32,
@@ -135,13 +140,24 @@ fn set_font_size(style: &mut egui::Style, size: f32) {
     }
 }
 
-#[derive(Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 enum View {
     #[default]
     Markdown,
     Read,
     Live,
 }
+
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+struct Session {
+    root: Option<PathBuf>,
+    file: Option<PathBuf>,
+    view: View,
+    fonts: FontSettings,
+}
+
+const SESSION_KEY: &str = "rust-note-session-v1";
 
 #[derive(Default)]
 struct Notes {
@@ -160,6 +176,42 @@ struct Notes {
 }
 
 impl Notes {
+    fn restore(storage: Option<&dyn eframe::Storage>) -> Self {
+        let session: Session = storage
+            .and_then(|s| eframe::get_value(s, SESSION_KEY))
+            .unwrap_or_default();
+        let mut app = Self {
+            view: session.view,
+            fonts: session.fonts,
+            ..Default::default()
+        };
+        app.fonts.ui_size = if app.fonts.ui_size.is_finite() {
+            app.fonts.ui_size.clamp(10.0, 28.0)
+        } else {
+            14.0
+        };
+        app.fonts.content_size = if app.fonts.content_size.is_finite() {
+            app.fonts.content_size.clamp(10.0, 40.0)
+        } else {
+            14.0
+        };
+        if let Some(root) = session.root {
+            if root.is_dir() {
+                app.root = Some(root.clone());
+                app.explorer.selected = Some(root.clone());
+                if let Some(file) = session.file.filter(|file| file.starts_with(&root)) {
+                    app.open_file(file);
+                    if let Some(file) = &app.file {
+                        app.explorer.reveal(&root, file);
+                    }
+                }
+            } else {
+                app.status = format!("Previous folder is unavailable: {}", root.display());
+            }
+        }
+        app
+    }
+
     fn settings_dialog(&mut self, ctx: &egui::Context) {
         if !self.settings_open {
             return;
@@ -188,7 +240,7 @@ impl Notes {
                 .changed();
             ui.weak("Markdown, Read mode, and Live Preview");
             ui.add_space(12.0);
-            ui.label("Changes apply immediately for this session.");
+            ui.label("Changes apply immediately and are remembered next time.");
             ui.horizontal(|ui| {
                 if ui.button("Reset defaults").clicked() {
                     self.fonts = FontSettings::default();
@@ -353,6 +405,23 @@ impl Notes {
 }
 
 impl eframe::App for Notes {
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        eframe::set_value(
+            storage,
+            SESSION_KEY,
+            &Session {
+                root: self.root.clone(),
+                file: self.file.clone(),
+                view: self.view,
+                fonts: self.fonts.clone(),
+            },
+        );
+    }
+
+    fn persist_egui_memory(&self) -> bool {
+        false
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         if ctx.input(|i| i.viewport().close_requested()) && !self.may_leave() {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
@@ -526,6 +595,54 @@ impl eframe::App for Notes {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use eframe::Storage;
+    #[derive(Default)]
+    struct MemoryStorage(std::collections::HashMap<String, String>);
+    impl eframe::Storage for MemoryStorage {
+        fn get_string(&self, key: &str) -> Option<String> {
+            self.0.get(key).cloned()
+        }
+        fn set_string(&mut self, key: &str, value: String) {
+            self.0.insert(key.into(), value);
+        }
+        fn flush(&mut self) {}
+    }
+
+    #[test]
+    fn session_restores_preferences_and_last_document_from_disk() {
+        let root = std::env::temp_dir().join(format!("rust-note-session-{}", std::process::id()));
+        fs::create_dir_all(root.join("nested")).unwrap();
+        let file = root.join("nested/note.md");
+        fs::write(&file, "Saved content").unwrap();
+        let mut app = Notes {
+            root: Some(root.clone()),
+            file: Some(file.clone()),
+            view: View::Live,
+            fonts: FontSettings {
+                ui_size: 20.0,
+                content_size: 26.0,
+            },
+            text: "Unsaved draft".into(),
+            ..Default::default()
+        };
+        let mut storage = MemoryStorage::default();
+        eframe::App::save(&mut app, &mut storage);
+        let restored = Notes::restore(Some(&storage));
+        assert_eq!(restored.root, Some(root.clone()));
+        assert_eq!(restored.file, Some(file.clone()));
+        assert_eq!(restored.explorer.selected, Some(file));
+        assert!(restored.view == View::Live);
+        assert_eq!(restored.fonts.ui_size, 20.0);
+        assert_eq!(restored.fonts.content_size, 26.0);
+        assert_eq!(restored.text, "Saved content");
+        assert!(!restored.dirty());
+        fs::remove_dir_all(root).unwrap();
+        let restored = Notes::restore(Some(&storage));
+        assert!(restored.root.is_none());
+        assert!(restored.status.contains("unavailable"));
+        storage.set_string(SESSION_KEY, "invalid data".into());
+        assert_eq!(Notes::restore(Some(&storage)).fonts.ui_size, 14.0);
+    }
     #[test]
     fn create_subfolder_rejects_collisions_and_invalid_paths() {
         let root =
