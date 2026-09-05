@@ -52,7 +52,13 @@ fn name(path: &Path) -> String {
         .into_owned()
 }
 
-fn tree(ui: &mut egui::Ui, path: &Path, selected: Option<&Path>, clicked: &mut Option<PathBuf>) {
+fn tree(
+    ui: &mut egui::Ui,
+    path: &Path,
+    selected: Option<&Path>,
+    clicked: &mut Option<PathBuf>,
+    new_note: &mut Option<PathBuf>,
+) {
     egui::CollapsingHeader::new(name(path))
         .id_salt(path)
         .default_open(false)
@@ -63,7 +69,7 @@ fn tree(ui: &mut egui::Ui, path: &Path, selected: Option<&Path>, clicked: &mut O
                 }
                 for item in items {
                     if item.directory {
-                        tree(ui, &item.path, selected, clicked);
+                        tree(ui, &item.path, selected, clicked, new_note);
                     } else if ui
                         .selectable_label(selected == Some(item.path.as_path()), name(&item.path))
                         .on_hover_text(item.path.display().to_string())
@@ -79,7 +85,53 @@ fn tree(ui: &mut egui::Ui, path: &Path, selected: Option<&Path>, clicked: &mut O
                     format!("Cannot read folder: {error}"),
                 );
             }
+        })
+        .header_response
+        .context_menu(|ui| {
+            if ui.button("New Note…").clicked() {
+                *new_note = Some(path.to_path_buf());
+                ui.close_menu();
+            }
         });
+}
+
+fn create_note(folder: &Path, filename: &str) -> Result<PathBuf, String> {
+    let filename = filename.trim();
+    if filename.is_empty()
+        || filename == "."
+        || filename == ".."
+        || filename.ends_with('.')
+        || filename
+            .chars()
+            .any(|c| c.is_control() || "<>:\"/\\|?*".contains(c))
+    {
+        return Err("Enter a valid file name without folders or special characters.".into());
+    }
+    let filename = if Path::new(filename).extension().is_none() {
+        format!("{filename}.md")
+    } else {
+        filename.to_owned()
+    };
+    let path = folder.join(filename);
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .map_err(|error| {
+            if error.kind() == io::ErrorKind::AlreadyExists {
+                "A file with that name already exists. Choose another name.".into()
+            } else {
+                format!("Could not create note: {error}")
+            }
+        })?;
+    Ok(path)
+}
+
+struct NewNote {
+    folder: PathBuf,
+    filename: String,
+    error: String,
+    focus: bool,
 }
 
 #[derive(Default)]
@@ -91,9 +143,56 @@ struct Notes {
     status: String,
     read_mode: bool,
     markdown_cache: CommonMarkCache,
+    new_note: Option<NewNote>,
 }
 
 impl Notes {
+    fn new_note_dialog(&mut self, ctx: &egui::Context) {
+        let Some(mut draft) = self.new_note.take() else {
+            return;
+        };
+        let mut create = false;
+        let mut cancel = false;
+        let response = egui::Modal::new(egui::Id::new("new_note")).show(ctx, |ui| {
+            ui.set_min_width(360.0);
+            ui.heading("New Note");
+            ui.label(format!("Create in {}", draft.folder.display()));
+            ui.label("File name");
+            let input =
+                ui.add(egui::TextEdit::singleline(&mut draft.filename).hint_text("Untitled.md"));
+            if draft.focus {
+                input.request_focus();
+                draft.focus = false;
+            }
+            ui.weak("Names without an extension get .md automatically.");
+            if !draft.error.is_empty() {
+                ui.colored_label(egui::Color32::LIGHT_RED, &draft.error);
+            }
+            ui.horizontal(|ui| {
+                create = ui.button("Create").clicked()
+                    || (input.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
+                cancel = ui.button("Cancel").clicked();
+            });
+        });
+        if cancel || response.should_close() {
+            return;
+        }
+        if create && self.may_leave() {
+            match create_note(&draft.folder, &draft.filename) {
+                Ok(path) => {
+                    self.file = Some(path);
+                    self.text.clear();
+                    self.saved.clear();
+                    self.read_mode = false;
+                    self.status = "Note created".into();
+                    return;
+                }
+                Err(error) => draft.error = error,
+            }
+        }
+        self.new_note = Some(draft);
+    }
+
     fn dirty(&self) -> bool {
         self.text != self.saved
     }
@@ -171,10 +270,14 @@ impl eframe::App for Notes {
         if ctx.input(|i| i.viewport().close_requested()) && !self.may_leave() {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
         }
-        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::S)) {
+        if self.new_note.is_none()
+            && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::S))
+        {
             self.save();
         }
-        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::O)) {
+        if self.new_note.is_none()
+            && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::O))
+        {
             self.open_folder();
         }
 
@@ -229,6 +332,7 @@ impl eframe::App for Notes {
             });
         });
         let mut clicked = None;
+        let mut new_note = None;
         egui::SidePanel::left("files")
             .resizable(true)
             .default_width(260.0)
@@ -238,8 +342,9 @@ impl eframe::App for Notes {
                 ui.strong("EXPLORER");
                 ui.add_space(8.0);
                 if let Some(root) = &self.root {
-                    egui::ScrollArea::both()
-                        .show(ui, |ui| tree(ui, root, self.file.as_deref(), &mut clicked));
+                    egui::ScrollArea::both().show(ui, |ui| {
+                        tree(ui, root, self.file.as_deref(), &mut clicked, &mut new_note)
+                    });
                 } else {
                     ui.weak("Your notes live in a folder.");
                     ui.add_space(8.0);
@@ -250,6 +355,14 @@ impl eframe::App for Notes {
             });
         if let Some(path) = clicked {
             self.open_file(path);
+        }
+        if let Some(folder) = new_note {
+            self.new_note = Some(NewNote {
+                folder,
+                filename: String::new(),
+                error: String::new(),
+                focus: true,
+            });
         }
         egui::CentralPanel::default().show(ctx, |ui| {
             if let Some(path) = &self.file {
@@ -293,12 +406,41 @@ impl eframe::App for Notes {
                 });
             }
         });
+        self.new_note_dialog(ctx);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn create_note_in_subfolder_without_overwriting_existing_files() {
+        let root =
+            std::env::temp_dir().join(format!("rust-note-create-test-{}", std::process::id()));
+        let folder = root.join("nested");
+        fs::create_dir_all(&folder).unwrap();
+        let path = create_note(&folder, "My note").unwrap();
+        assert_eq!(path, folder.join("My note.md"));
+        fs::write(&path, "Keep this content").unwrap();
+        assert!(create_note(&folder, "My note.md").is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "Keep this content");
+        for invalid in [
+            "",
+            "  ",
+            ".",
+            "..",
+            "../escape",
+            "sub/note",
+            "sub\\note",
+            "C:note",
+            "note.",
+        ] {
+            assert!(create_note(&folder, invalid).is_err(), "{invalid}");
+        }
+        assert!(create_note(&root.join("missing"), "note").is_err());
+        assert!(create_note(&folder, "Explicit.markdown").unwrap().is_file());
+        fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn browse_nested_folder_and_save_note() {
         let root = std::env::temp_dir().join(format!("rust-note-test-{}", std::process::id()));
