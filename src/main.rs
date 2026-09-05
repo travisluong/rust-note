@@ -547,6 +547,24 @@ impl eframe::App for Notes {
                 );
                 ui.separator();
                 ui.menu_button("File", |ui| {
+                    for (label, is_folder) in [("New File", false), ("New Folder", true)] {
+                        if ui
+                            .add_enabled(!self.roots.is_empty(), egui::Button::new(label))
+                            .clicked()
+                        {
+                            if let Some(folder) = self.roots.first() {
+                                self.new_note = Some(NewNote {
+                                    is_folder,
+                                    folder: folder.clone(),
+                                    filename: String::new(),
+                                    error: String::new(),
+                                    focus: true,
+                                });
+                            }
+                            ui.close_menu();
+                        }
+                    }
+                    ui.separator();
                     if ui.button("Manage Notebooks    Ctrl+O").clicked() {
                         ui.close_menu();
                         self.notebooks_open = true;

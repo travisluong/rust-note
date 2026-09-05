@@ -160,18 +160,6 @@ impl Explorer {
                 }
             }
         }
-        ui.add_enabled_ui(enabled, |ui| {
-            ui.menu_button("New…", |ui| {
-                if let Some(root) = roots.first() {
-                    for (label, folder) in [("New Note…", false), ("New Folder…", true)] {
-                        if ui.button(label).clicked() {
-                            new_entry = Some((root.clone(), folder));
-                            ui.close_menu();
-                        }
-                    }
-                }
-            });
-        });
         egui::ScrollArea::both().show(ui, |ui| {
             for error in &errors {
                 ui.colored_label(egui::Color32::LIGHT_RED, error);

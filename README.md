@@ -14,7 +14,7 @@ cargo run
 - Choose a notebook from **Notebooks** to browse it in the sidebar. Hover over its name to see its full path. Switching notebooks preserves the current note and any unsaved draft.
 - In **Manage Notebooks**, click **Remove** to unregister a notebook. Its files and any open draft are preserved. Removing the active notebook clears the sidebar.
 - The menu bar shows the active notebook’s folder name, or **Rust Note** when none is open. The sidebar shows its contents directly, without a notebook root row. Click a subfolder arrow to expand it.
-- Use **New…** in the sidebar to create a note or folder directly in the notebook.
+- Use **File → New File** or **File → New Folder** to create a file or folder directly in the active notebook. These actions are disabled when no notebook is open.
 - Click a file to edit its Markdown source in the right pane.
 - Click an entry to focus the sidebar, then use **Up/Down** to navigate visible files and folders. Files open immediately. **Right** expands a folder (or enters its first child when already expanded); **Left** collapses it or selects its parent. Arrow keys in the editor continue to move the text cursor. Unsaved changes still prompt before switching files.
 - Right-click any folder and choose **New Folder…**, enter a name, then click **Create** (or press Enter). The subfolder appears when its parent is expanded. Existing files and folders are preserved, and your current note stays open.
