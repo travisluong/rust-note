@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod live;
 use eframe::egui;
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use std::{
@@ -158,6 +159,14 @@ fn set_font_size(style: &mut egui::Style, size: f32) {
     }
 }
 
+#[derive(Clone, Copy, Default, PartialEq, Eq, Hash)]
+enum View {
+    #[default]
+    Markdown,
+    Read,
+    Live,
+}
+
 #[derive(Default)]
 struct Notes {
     root: Option<PathBuf>,
@@ -165,7 +174,8 @@ struct Notes {
     text: String,
     saved: String,
     status: String,
-    read_mode: bool,
+    view: View,
+    live_editor: live::LiveEditor,
     markdown_cache: CommonMarkCache,
     new_note: Option<NewNote>,
     settings_open: bool,
@@ -199,7 +209,7 @@ impl Notes {
                         .step_by(1.0),
                 )
                 .changed();
-            ui.weak("Markdown editor and read mode");
+            ui.weak("Markdown, Read mode, and Live Preview");
             ui.add_space(12.0);
             ui.label("Changes apply immediately for this session.");
             ui.horizontal(|ui| {
@@ -255,7 +265,8 @@ impl Notes {
                     self.file = Some(path);
                     self.text.clear();
                     self.saved.clear();
-                    self.read_mode = false;
+                    self.view = View::Markdown;
+                    self.live_editor = live::LiveEditor::default();
                     self.status = "Note created".into();
                     return;
                 }
@@ -310,6 +321,7 @@ impl Notes {
         {
             self.root = Some(path);
             self.file = None;
+            self.live_editor = live::LiveEditor::default();
             self.text.clear();
             self.saved.clear();
             self.status = "Click the folder arrow to browse your notes".into();
@@ -327,6 +339,7 @@ impl Notes {
                     self.saved = text.clone();
                     self.text = text;
                     self.file = Some(path);
+                    self.live_editor = live::LiveEditor::default();
                     self.status.clear();
                 }
             }
@@ -378,18 +391,27 @@ impl eframe::App for Notes {
                     }
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let label = if self.read_mode {
-                        "Markdown view"
-                    } else {
-                        "Read mode"
-                    };
-                    if ui
-                        .add_enabled(self.file.is_some(), egui::Button::new(label))
-                        .on_hover_text("Switch between Markdown source and rendered text")
-                        .clicked()
-                    {
-                        self.read_mode = !self.read_mode;
-                    }
+                    ui.add_enabled_ui(self.file.is_some(), |ui| {
+                        let previous = self.view;
+                        egui::ComboBox::from_id_salt("view")
+                            .selected_text(match self.view {
+                                View::Markdown => "Markdown view",
+                                View::Read => "Read mode",
+                                View::Live => "Live Preview",
+                            })
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(
+                                    &mut self.view,
+                                    View::Markdown,
+                                    "Markdown view",
+                                );
+                                ui.selectable_value(&mut self.view, View::Read, "Read mode");
+                                ui.selectable_value(&mut self.view, View::Live, "Live Preview");
+                            });
+                        if self.view != previous {
+                            self.live_editor = live::LiveEditor::default();
+                        }
+                    });
                 });
             });
         });
@@ -455,11 +477,13 @@ impl eframe::App for Notes {
                 ui.weak(path.display().to_string());
                 ui.separator();
                 egui::ScrollArea::vertical()
-                    .id_salt((path, self.read_mode))
+                    .id_salt((path, self.view))
                     .show(ui, |ui| {
                         set_font_size(ui.style_mut(), self.fonts.content_size);
-                        if self.read_mode {
+                        if self.view == View::Read {
                             CommonMarkViewer::new().show(ui, &mut self.markdown_cache, &self.text);
+                        } else if self.view == View::Live {
+                            self.live_editor.show(ui, &mut self.text);
                         } else {
                             ui.add_sized(
                                 [ui.available_width(), ui.available_height()],

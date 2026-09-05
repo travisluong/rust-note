@@ -14,7 +14,7 @@ cargo run
 - Click the folder arrow in the left sidebar to expand it. Subfolders expand recursively.
 - Click a file to edit its Markdown source in the right pane.
 - Right-click any folder and choose **New Note…**, enter a file name, then click **Create** (or press Enter). Names without extensions get `.md`. The new note opens in the editor; existing files are never overwritten. **Cancel** or Escape dismisses the dialog.
-- Click **Read mode** in the upper right to render the current text, including unsaved edits. Click **Markdown view** to return to editing. Switching views preserves your changes.
+- Use the upper-right view selector to choose **Markdown view**, **Read mode**, or **Live Preview**. Live Preview is a continuous editor: type, press Enter, select across paragraphs, and undo normally. Headings, emphasis, links, and code are styled as you type; Markdown markers reveal on the active line and hide elsewhere. There are no paragraph controls or Done buttons. All views share the same text and Save command. Live Preview keeps lists, tables, images, and code fences in their Markdown representation; use Read mode for full rendering.
 - Choose **File → Save** (Ctrl+S / Cmd+S) to write changes.
 - Choose **File → Settings…** to independently adjust UI and content font sizes. Content sizing applies to both editing and read mode. Changes apply immediately for the current session; **Reset defaults** restores the original sizes.
 - Switching documents or folders and closing the window prompts to save unsaved changes.
