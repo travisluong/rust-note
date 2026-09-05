@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod explorer;
 mod live;
 use eframe::egui;
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
@@ -51,53 +52,6 @@ fn name(path: &Path) -> String {
         .unwrap_or(path.as_os_str())
         .to_string_lossy()
         .into_owned()
-}
-
-fn tree(
-    ui: &mut egui::Ui,
-    path: &Path,
-    selected: Option<&Path>,
-    clicked: &mut Option<PathBuf>,
-    new_note: &mut Option<(PathBuf, bool)>,
-) {
-    egui::CollapsingHeader::new(name(path))
-        .id_salt(path)
-        .default_open(false)
-        .show(ui, |ui| match entries(path) {
-            Ok(items) => {
-                if items.is_empty() {
-                    ui.weak("Empty folder");
-                }
-                for item in items {
-                    if item.directory {
-                        tree(ui, &item.path, selected, clicked, new_note);
-                    } else if ui
-                        .selectable_label(selected == Some(item.path.as_path()), name(&item.path))
-                        .on_hover_text(item.path.display().to_string())
-                        .clicked()
-                    {
-                        *clicked = Some(item.path);
-                    }
-                }
-            }
-            Err(error) => {
-                ui.colored_label(
-                    egui::Color32::LIGHT_RED,
-                    format!("Cannot read folder: {error}"),
-                );
-            }
-        })
-        .header_response
-        .context_menu(|ui| {
-            if ui.button("New Note…").clicked() {
-                *new_note = Some((path.to_path_buf(), false));
-                ui.close_menu();
-            }
-            if ui.button("New Folder…").clicked() {
-                *new_note = Some((path.to_path_buf(), true));
-                ui.close_menu();
-            }
-        });
 }
 
 fn validate_name(filename: &str) -> Result<&str, String> {
@@ -191,6 +145,7 @@ enum View {
 
 #[derive(Default)]
 struct Notes {
+    explorer: explorer::Explorer,
     root: Option<PathBuf>,
     file: Option<PathBuf>,
     text: String,
@@ -364,6 +319,8 @@ impl Notes {
             .pick_folder()
             && self.may_leave()
         {
+            self.explorer = explorer::Explorer::default();
+            self.explorer.selected = Some(path.clone());
             self.root = Some(path);
             self.file = None;
             self.live_editor = live::LiveEditor::default();
@@ -488,9 +445,11 @@ impl eframe::App for Notes {
                 ui.strong("EXPLORER");
                 ui.add_space(8.0);
                 if let Some(root) = &self.root {
-                    egui::ScrollArea::both().show(ui, |ui| {
-                        tree(ui, root, self.file.as_deref(), &mut clicked, &mut new_note)
-                    });
+                    (clicked, new_note) = self.explorer.show(
+                        ui,
+                        root,
+                        self.new_note.is_none() && !self.settings_open,
+                    );
                 } else {
                     ui.weak("Your notes live in a folder.");
                     ui.add_space(8.0);
@@ -500,7 +459,10 @@ impl eframe::App for Notes {
                 }
             });
         if let Some(path) = clicked {
-            self.open_file(path);
+            self.open_file(path.clone());
+            if self.file.as_ref() != Some(&path) {
+                self.explorer.selected.clone_from(&self.file);
+            }
         }
         if let Some((folder, is_folder)) = new_note {
             self.new_note = Some(NewNote {
