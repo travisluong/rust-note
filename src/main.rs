@@ -51,6 +51,39 @@ fn entries(path: &Path) -> io::Result<Vec<Entry>> {
     Ok(items)
 }
 
+fn notebook_files(roots: &[PathBuf]) -> (Vec<PathBuf>, Vec<String>) {
+    fn collect(path: &Path, files: &mut Vec<PathBuf>, errors: &mut Vec<String>) {
+        match entries(path) {
+            Ok(children) => {
+                for child in children {
+                    if child.directory {
+                        collect(&child.path, files, errors);
+                    } else {
+                        files.push(child.path);
+                    }
+                }
+            }
+            Err(error) => errors.push(format!("Cannot read {}: {error}", path.display())),
+        }
+    }
+
+    let mut files = Vec::new();
+    let mut errors = Vec::new();
+    for root in roots {
+        collect(root, &mut files, &mut errors);
+    }
+    files.sort_by_key(|path| path.to_string_lossy().to_lowercase());
+    (files, errors)
+}
+
+fn notebook_file_label(roots: &[PathBuf], path: &Path) -> String {
+    roots
+        .iter()
+        .find_map(|root| path.strip_prefix(root).ok())
+        .filter(|relative| !relative.as_os_str().is_empty())
+        .map_or_else(|| name(path), |relative| relative.display().to_string())
+}
+
 fn name(path: &Path) -> String {
     path.file_name()
         .unwrap_or(path.as_os_str())
@@ -161,6 +194,29 @@ struct NewNote {
     focus: bool,
 }
 
+#[derive(Default)]
+struct GoToFile {
+    query: String,
+    selected: usize,
+    focus: bool,
+}
+
+impl GoToFile {
+    fn navigate(&mut self, count: usize, key: egui::Key) {
+        if count == 0 {
+            self.selected = 0;
+            return;
+        }
+        match key {
+            egui::Key::ArrowUp => self.selected = self.selected.saturating_sub(1),
+            egui::Key::ArrowDown => {
+                self.selected = (self.selected + 1).min(count.saturating_sub(1));
+            }
+            _ => {}
+        }
+    }
+}
+
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 struct FontSettings {
@@ -227,6 +283,7 @@ struct Notes {
     live_editor: live::LiveEditor,
     markdown_cache: CommonMarkCache,
     new_note: Option<NewNote>,
+    go_to_file: Option<GoToFile>,
     settings_open: bool,
     notebooks_open: bool,
     fonts: FontSettings,
@@ -621,6 +678,103 @@ impl Notes {
         }
     }
 
+    fn go_to_file_dialog(&mut self, ctx: &egui::Context) {
+        let Some(mut dialog) = self.go_to_file.take() else {
+            return;
+        };
+        let (files, errors) = notebook_files(&self.roots);
+        let query = dialog.query.to_lowercase();
+        let mut matches: Vec<(PathBuf, String)> = files
+            .into_iter()
+            .map(|path| {
+                let label = notebook_file_label(&self.roots, &path);
+                (path, label)
+            })
+            .filter(|(_, label)| query.is_empty() || label.to_lowercase().contains(&query))
+            .collect();
+        matches.sort_by_key(|(_, label)| label.to_lowercase());
+        dialog.selected = dialog.selected.min(matches.len().saturating_sub(1));
+
+        let mut accepted = false;
+        let mut accepted_path = None;
+        let response = egui::Modal::new(egui::Id::new("go_to_file")).show(ctx, |ui| {
+            ui.set_min_width(520.0);
+            ui.heading("Go to File");
+            let input = ui.add(
+                egui::TextEdit::singleline(&mut dialog.query)
+                    .hint_text("Search files…")
+                    .desired_width(f32::INFINITY),
+            );
+            if dialog.focus {
+                input.request_focus();
+                dialog.focus = false;
+            }
+            if input.changed() {
+                dialog.selected = 0;
+            }
+
+            if ui.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
+                dialog.navigate(matches.len(), egui::Key::ArrowUp);
+            }
+            if ui.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
+                dialog.navigate(matches.len(), egui::Key::ArrowDown);
+            }
+
+            ui.add_space(8.0);
+            egui::ScrollArea::vertical()
+                .max_height(360.0)
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    for (index, (_, label)) in matches.iter().enumerate() {
+                        let row = ui.selectable_label(dialog.selected == index, label);
+                        if row.clicked() {
+                            dialog.selected = index;
+                        }
+                        if dialog.selected == index {
+                            row.scroll_to_me(Some(egui::Align::Center));
+                        }
+                    }
+                    if matches.is_empty() {
+                        ui.weak(if self.roots.is_empty() {
+                            "No notebook is open."
+                        } else {
+                            "No matching files."
+                        });
+                    }
+                    for error in &errors {
+                        ui.colored_label(egui::Color32::LIGHT_RED, error);
+                    }
+                });
+            ui.add_space(4.0);
+            ui.weak("↑ ↓ to navigate  •  Enter to open  •  Esc to cancel");
+
+            if ui.input(|i| i.key_pressed(egui::Key::Enter))
+                && let Some((path, _)) = matches.get(dialog.selected)
+            {
+                accepted = true;
+                accepted_path = Some(path.clone());
+            }
+        });
+
+        if response.should_close() && !accepted {
+            return;
+        }
+        if let Some(path) = accepted_path {
+            if self.open_file(path.clone()) {
+                for root in &self.roots {
+                    if path.starts_with(root) {
+                        self.explorer.reveal(root, &path);
+                        break;
+                    }
+                }
+            } else {
+                self.go_to_file = Some(dialog);
+            }
+        } else {
+            self.go_to_file = Some(dialog);
+        }
+    }
+
     fn move_item(&mut self, source: PathBuf, folder: PathBuf) {
         let Some(root) = self.roots.first() else {
             return;
@@ -643,9 +797,9 @@ impl Notes {
         }
     }
 
-    fn open_file(&mut self, path: PathBuf) {
+    fn open_file(&mut self, path: PathBuf) -> bool {
         if self.file.as_ref() == Some(&path) {
-            return;
+            return true;
         }
         // Read first so an unreadable file never replaces the current document.
         match fs::read_to_string(&path) {
@@ -658,10 +812,14 @@ impl Notes {
                     self.autosave_retry_at = None;
                     self.live_editor = live::LiveEditor::default();
                     self.status.clear();
+                    true
+                } else {
+                    false
                 }
             }
             Err(error) => {
-                self.status = format!("Cannot open {} as UTF-8 text: {error}", name(&path))
+                self.status = format!("Cannot open {} as UTF-8 text: {error}", name(&path));
+                false
             }
         }
     }
@@ -696,6 +854,7 @@ impl eframe::App for Notes {
         if self.new_note.is_none()
             && !self.settings_open
             && !self.notebooks_open
+            && self.go_to_file.is_none()
             && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::S))
         {
             self.save();
@@ -703,9 +862,13 @@ impl eframe::App for Notes {
         if self.new_note.is_none()
             && !self.settings_open
             && !self.notebooks_open
+            && self.go_to_file.is_none()
             && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::O))
         {
-            self.notebooks_open = true;
+            self.go_to_file = Some(GoToFile {
+                focus: true,
+                ..Default::default()
+            });
         }
 
         egui::TopBottomPanel::top("menu").show(ctx, |ui| {
@@ -736,7 +899,14 @@ impl eframe::App for Notes {
                         }
                     }
                     ui.separator();
-                    if ui.button("Manage Notebooks    Ctrl+O").clicked() {
+                    if ui.button("Go to File    Ctrl+O").clicked() {
+                        ui.close_menu();
+                        self.go_to_file = Some(GoToFile {
+                            focus: true,
+                            ..Default::default()
+                        });
+                    }
+                    if ui.button("Manage Notebooks").clicked() {
                         ui.close_menu();
                         self.notebooks_open = true;
                     }
@@ -831,7 +1001,10 @@ impl eframe::App for Notes {
                     let actions = self.explorer.show(
                         ui,
                         &self.roots,
-                        self.new_note.is_none() && !self.settings_open && !self.notebooks_open,
+                        self.new_note.is_none()
+                            && self.go_to_file.is_none()
+                            && !self.settings_open
+                            && !self.notebooks_open,
                     );
                     moved = actions.move_entry;
                     clicked = actions.open_file;
@@ -918,6 +1091,7 @@ impl eframe::App for Notes {
         self.new_note_dialog(ctx);
         self.settings_dialog(ctx);
         self.notebooks_dialog(ctx);
+        self.go_to_file_dialog(ctx);
         self.autosave_if_due(ctx);
     }
 }
@@ -1321,5 +1495,50 @@ mod tests {
         app.open_file(root.join("missing.md"));
         assert_eq!(app.text, "# Original\nEdited");
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn go_to_file_finds_files_in_nested_notebook_folders() {
+        let root =
+            std::env::temp_dir().join(format!("rust-note-go-to-file-{}", std::process::id()));
+        fs::create_dir_all(root.join("folder/nested")).unwrap();
+        fs::write(root.join("folder/a.md"), "A").unwrap();
+        fs::write(root.join("folder/nested/deep.md"), "Deep").unwrap();
+        fs::write(root.join("root.md"), "Root").unwrap();
+
+        let (files, errors) = notebook_files(std::slice::from_ref(&root));
+
+        assert!(errors.is_empty());
+        let labels = files
+            .iter()
+            .map(|path| notebook_file_label(std::slice::from_ref(&root), path))
+            .collect::<Vec<_>>();
+        let expected = [
+            root.join("folder").join("a.md"),
+            root.join("folder").join("nested").join("deep.md"),
+            root.join("root.md"),
+        ]
+        .map(|path| notebook_file_label(std::slice::from_ref(&root), &path));
+        assert_eq!(labels, expected);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn go_to_file_navigation_stays_within_matching_files() {
+        let mut picker = GoToFile::default();
+
+        picker.navigate(3, egui::Key::ArrowDown);
+        assert_eq!(picker.selected, 1);
+        picker.navigate(3, egui::Key::ArrowDown);
+        picker.navigate(3, egui::Key::ArrowDown);
+        assert_eq!(picker.selected, 2);
+        picker.navigate(3, egui::Key::ArrowUp);
+        assert_eq!(picker.selected, 1);
+        picker.navigate(3, egui::Key::ArrowUp);
+        picker.navigate(3, egui::Key::ArrowUp);
+        assert_eq!(picker.selected, 0);
+
+        picker.navigate(0, egui::Key::ArrowDown);
+        assert_eq!(picker.selected, 0);
     }
 }
