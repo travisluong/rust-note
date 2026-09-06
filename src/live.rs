@@ -53,6 +53,68 @@ fn task_markers(source: &str) -> Vec<TaskMarker> {
         .collect()
 }
 
+fn task_prefix(line: &str) -> Option<String> {
+    let marker_end = line.find(']')?;
+    let marker = &line[..marker_end + 1];
+    let marker_start = marker
+        .char_indices()
+        .rev()
+        .find(|(_, ch)| matches!(ch, '-' | '*' | '+'))
+        .map(|(index, _)| index)?;
+    let prefix = &line[..marker_start];
+    let bullet = &line[marker_start..marker_start + 1];
+    let task = &line[marker_start + 1..];
+    if !prefix.chars().all(char::is_whitespace)
+        || !task.starts_with(" [")
+        || !matches!(task.as_bytes().get(2), Some(b' ' | b'x' | b'X'))
+        || task.as_bytes().get(3) != Some(&b']')
+    {
+        return None;
+    }
+    Some(format!("{prefix}{bullet} [ ] "))
+}
+
+fn byte_at_char(source: &str, index: usize) -> usize {
+    source
+        .char_indices()
+        .nth(index)
+        .map_or(source.len(), |(byte, _)| byte)
+}
+
+pub fn continue_task_list(
+    text: &mut String,
+    before: &str,
+    cursor: &mut egui::text::CCursorRange,
+) -> bool {
+    if text.bytes().filter(|byte| *byte == b'\n').count()
+        <= before.bytes().filter(|byte| *byte == b'\n').count()
+    {
+        return false;
+    }
+    let cursor_index = cursor.primary.index;
+    let cursor_byte = byte_at_char(text, cursor_index);
+    let line_start = text[..cursor_byte].rfind('\n').map_or(0, |byte| byte + 1);
+    if line_start == 0 {
+        return false;
+    }
+    let previous_start = text[..line_start - 1]
+        .rfind('\n')
+        .map_or(0, |byte| byte + 1);
+    let previous_line = &text[previous_start..line_start - 1];
+    let Some(prefix) = task_prefix(previous_line) else {
+        return false;
+    };
+    let prefix_chars = prefix.chars().count();
+    text.insert_str(line_start, &prefix);
+    let primary = cursor.primary.index + prefix_chars;
+    let secondary = cursor.secondary.index + prefix_chars;
+    *cursor = egui::text::CCursorRange::two(
+        egui::text::CCursor::new(primary),
+        egui::text::CCursor::new(secondary),
+    );
+    true
+}
+
 fn active_lines(source: &str, selection: Option<(usize, usize)>) -> Range<usize> {
     let Some((a, b)) = selection else {
         return 0..0;
@@ -164,6 +226,7 @@ fn layout(source: &str, size: f32, color: Color32, active: Range<usize>) -> Layo
 impl LiveEditor {
     pub fn show(&mut self, ui: &mut egui::Ui, text: &mut String) {
         let id = ui.id().with("continuous_live_editor");
+        let before = text.clone();
         let selection = if ui.memory(|m| m.has_focus(id)) {
             self.selection
         } else {
@@ -210,6 +273,10 @@ impl LiveEditor {
             }
         }
         let mut state = output.state;
+        if let Some(mut range) = state.cursor.char_range() {
+            continue_task_list(text, &before, &mut range);
+            state.cursor.set_char_range(Some(range));
+        }
         let next = state.cursor.char_range().map(|range| {
             let primary = cursor_after_task_marker(text, range.primary);
             let secondary = cursor_after_task_marker(text, range.secondary);
@@ -300,5 +367,30 @@ mod tests {
             cursor_after_task_marker(source, egui::text::CCursor::new(6)).index,
             6
         );
+    }
+
+    #[test]
+    fn enter_continues_task_list_with_matching_indentation_and_bullet() {
+        let before = "  * [x] first";
+        let mut text = "  * [x] first\nsecond".to_owned();
+        let mut cursor = egui::text::CCursorRange::two(
+            egui::text::CCursor::new(15),
+            egui::text::CCursor::new(15),
+        );
+
+        assert!(continue_task_list(&mut text, before, &mut cursor));
+        assert_eq!(text, "  * [x] first\n  * [ ] second");
+        assert_eq!(cursor.primary.index, 23);
+    }
+
+    #[test]
+    fn enter_does_not_continue_non_task_lines() {
+        let before = "plain";
+        let mut text = "plain\ntext".to_owned();
+        let mut cursor =
+            egui::text::CCursorRange::two(egui::text::CCursor::new(6), egui::text::CCursor::new(6));
+
+        assert!(!continue_task_list(&mut text, before, &mut cursor));
+        assert_eq!(text, "plain\ntext");
     }
 }

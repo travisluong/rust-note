@@ -776,14 +776,20 @@ impl eframe::App for Notes {
                         } else if self.view == View::Live {
                             self.live_editor.show(ui, &mut self.text);
                         } else {
-                            ui.add_sized(
-                                [ui.available_width(), ui.available_height()],
-                                egui::TextEdit::multiline(&mut self.text)
-                                    .font(egui::TextStyle::Monospace)
-                                    .code_editor()
-                                    .desired_width(f32::INFINITY)
-                                    .frame(false),
-                            );
+                            let before = self.text.clone();
+                            let output = egui::TextEdit::multiline(&mut self.text)
+                                .id_salt("markdown_editor")
+                                .font(egui::TextStyle::Monospace)
+                                .code_editor()
+                                .desired_width(f32::INFINITY)
+                                .frame(false)
+                                .show(ui);
+                            let mut state = output.state;
+                            if let Some(mut range) = state.cursor.char_range() {
+                                live::continue_task_list(&mut self.text, &before, &mut range);
+                                state.cursor.set_char_range(Some(range));
+                                state.store(ctx, output.response.id);
+                            }
                         }
                     });
             } else {
