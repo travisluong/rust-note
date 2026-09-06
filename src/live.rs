@@ -13,6 +13,23 @@ struct TaskMarker {
     checked: bool,
 }
 
+fn char_index(source: &str, byte: usize) -> usize {
+    source[..byte].chars().count()
+}
+
+fn cursor_after_task_marker(source: &str, cursor: egui::text::CCursor) -> egui::text::CCursor {
+    let byte = source
+        .char_indices()
+        .nth(cursor.index)
+        .map_or(source.len(), |(index, _)| index);
+    for marker in task_markers(source) {
+        if marker.visual.start <= byte && byte <= marker.visual.end {
+            return egui::text::CCursor::new(char_index(source, marker.visual.end));
+        }
+    }
+    cursor
+}
+
 fn task_markers(source: &str) -> Vec<TaskMarker> {
     let options = Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
     Parser::new_ext(source, options)
@@ -172,7 +189,7 @@ impl LiveEditor {
         // Keep the Markdown source editable, but replace task-list markers with
         // native controls positioned over the corresponding rendered text.
         for marker in task_markers(text) {
-            let char_index = text[..marker.visual.start].chars().count();
+            let char_index = char_index(text, marker.visual.start);
             let cursor = output.galley.pos_from_cursor(
                 &output
                     .galley
@@ -192,9 +209,19 @@ impl LiveEditor {
                 ui.ctx().request_repaint();
             }
         }
-        let next = output
-            .cursor_range
-            .map(|r| (r.primary.ccursor.index, r.secondary.ccursor.index));
+        let mut state = output.state;
+        let next = state.cursor.char_range().map(|range| {
+            let primary = cursor_after_task_marker(text, range.primary);
+            let secondary = cursor_after_task_marker(text, range.secondary);
+            if primary != range.primary || secondary != range.secondary {
+                state
+                    .cursor
+                    .set_char_range(Some(egui::text::CCursorRange::two(primary, secondary)));
+                ui.ctx().request_repaint();
+            }
+            (primary.index, secondary.index)
+        });
+        state.store(ui.ctx(), id);
         if next != self.selection || output.response.gained_focus() || output.response.lost_focus()
         {
             self.selection = next;
@@ -258,5 +285,20 @@ mod tests {
             "- [x]"
         );
         assert!(markers[1].checked);
+    }
+
+    #[test]
+    fn cursor_skips_over_hidden_task_markers() {
+        let source = "- [ ] task";
+        for index in 0..=5 {
+            assert_eq!(
+                cursor_after_task_marker(source, egui::text::CCursor::new(index)).index,
+                5
+            );
+        }
+        assert_eq!(
+            cursor_after_task_marker(source, egui::text::CCursor::new(6)).index,
+            6
+        );
     }
 }

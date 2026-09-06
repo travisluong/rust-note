@@ -9,3 +9,6 @@ serde = { version = "1", features = ["derive"] }
 rfd = "0.15"
 pulldown-cmark = { version = "0.12", default-features = false }
 egui_commonmark = { version = "0.20", default-features = false }
+
+[patch.crates-io]
+egui_commonmark = { path = "vendor/egui_commonmark" }
