@@ -768,7 +768,11 @@ impl eframe::App for Notes {
                     .show(ui, |ui| {
                         set_font_size(ui.style_mut(), self.fonts.content_size);
                         if self.view == View::Read {
-                            CommonMarkViewer::new().show(ui, &mut self.markdown_cache, &self.text);
+                            CommonMarkViewer::new().show_mut(
+                                ui,
+                                &mut self.markdown_cache,
+                                &mut self.text,
+                            );
                         } else if self.view == View::Live {
                             self.live_editor.show(ui, &mut self.text);
                         } else {

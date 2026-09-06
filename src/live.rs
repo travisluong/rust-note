@@ -7,6 +7,35 @@ pub struct LiveEditor {
     selection: Option<(usize, usize)>,
 }
 
+struct TaskMarker {
+    source: Range<usize>,
+    visual: Range<usize>,
+    checked: bool,
+}
+
+fn task_markers(source: &str) -> Vec<TaskMarker> {
+    let options = Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
+    Parser::new_ext(source, options)
+        .into_offset_iter()
+        .filter_map(|(event, range)| {
+            let Event::TaskListMarker(checked) = event else {
+                return None;
+            };
+            let line_start = source[..range.start]
+                .rfind('\n')
+                .map_or(0, |index| index + 1);
+            let dash = source[line_start..range.start]
+                .rfind('-')
+                .map_or(range.start, |index| line_start + index);
+            Some(TaskMarker {
+                source: range.clone(),
+                visual: dash..range.end,
+                checked,
+            })
+        })
+        .collect()
+}
+
 fn active_lines(source: &str, selection: Option<(usize, usize)>) -> Range<usize> {
     let Some((a, b)) = selection else {
         return 0..0;
@@ -34,8 +63,11 @@ fn layout(source: &str, size: f32, color: Color32, active: Range<usize>) -> Layo
     };
     let mut formats = vec![base.clone(); source.len()];
     let mut hidden = vec![false; source.len()];
-    for (event, range) in Parser::new_ext(source, Options::ENABLE_STRIKETHROUGH).into_offset_iter()
-    {
+    for marker in task_markers(source) {
+        hidden[marker.visual].fill(true);
+    }
+    let options = Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
+    for (event, range) in Parser::new_ext(source, options).into_offset_iter() {
         match event {
             Event::Start(tag) => {
                 match &tag {
@@ -128,6 +160,30 @@ impl LiveEditor {
             .hint_text("Write your note…")
             .layouter(&mut layouter)
             .show(ui);
+
+        // Keep the Markdown source editable, but replace task-list markers with
+        // native controls positioned over the corresponding rendered text.
+        for marker in task_markers(text) {
+            let char_index = text[..marker.visual.start].chars().count();
+            let cursor = output.galley.pos_from_cursor(
+                &output
+                    .galley
+                    .from_ccursor(egui::text::CCursor::new(char_index)),
+            );
+            let size = ui.spacing().interact_size.y;
+            let rect = egui::Rect::from_min_size(
+                output.galley_pos + cursor.min.to_vec2(),
+                egui::vec2(size, size),
+            );
+            let mut checked = marker.checked;
+            if ui
+                .put(rect, egui::Checkbox::without_text(&mut checked))
+                .clicked()
+            {
+                text.replace_range(marker.source, if checked { "[x]" } else { "[ ]" });
+                ui.ctx().request_repaint();
+            }
+        }
         let next = output
             .cursor_range
             .map(|r| (r.primary.ccursor.index, r.secondary.ccursor.index));
@@ -178,5 +234,21 @@ mod tests {
         assert!(inactive.sections[2].format.font_id.size > 16.0);
         let active = layout(source, 16.0, Color32::GRAY, 0..7);
         assert_ne!(active.sections[0].format.color, Color32::TRANSPARENT);
+    }
+
+    #[test]
+    fn task_markers_hide_the_markdown_prefix_and_preserve_checkbox_state() {
+        let markers = task_markers("- [ ] one\n  - [x] two");
+        assert_eq!(markers.len(), 2);
+        assert_eq!(
+            &"- [ ] one\n  - [x] two"[markers[0].visual.clone()],
+            "- [ ]"
+        );
+        assert!(!markers[0].checked);
+        assert_eq!(
+            &"- [ ] one\n  - [x] two"[markers[1].visual.clone()],
+            "- [x]"
+        );
+        assert!(markers[1].checked);
     }
 }
