@@ -7,6 +7,7 @@ use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use std::{
     fs, io,
     path::{Path, PathBuf},
+    time::{Duration, Instant},
 };
 
 fn main() -> eframe::Result {
@@ -205,9 +206,12 @@ struct Session {
     view: View,
     fonts: FontSettings,
     zoom_factor: Option<f32>,
+    autosave_enabled: bool,
 }
 
 const SESSION_KEY: &str = "rust-note-session-v1";
+const AUTOSAVE_DELAY: Duration = Duration::from_secs(1);
+const AUTOSAVE_RETRY_DELAY: Duration = Duration::from_secs(5);
 
 #[derive(Default)]
 struct Notes {
@@ -226,6 +230,9 @@ struct Notes {
     settings_open: bool,
     notebooks_open: bool,
     fonts: FontSettings,
+    autosave_enabled: bool,
+    last_edit_at: Option<Instant>,
+    autosave_retry_at: Option<Instant>,
 }
 
 impl Notes {
@@ -243,6 +250,7 @@ impl Notes {
             egui_ctx,
             view: session.view,
             fonts: session.fonts,
+            autosave_enabled: session.autosave_enabled,
             ..Default::default()
         };
         app.fonts.ui_size = if app.fonts.ui_size.is_finite() {
@@ -317,10 +325,25 @@ impl Notes {
                 .changed();
             ui.weak("Markdown, Read mode, and Live Preview");
             ui.add_space(12.0);
+            ui.label("Autosave");
+            let autosave_changed = ui
+                .checkbox(&mut self.autosave_enabled, "Save notes automatically")
+                .changed();
+            changed |= autosave_changed;
+            ui.weak("Saves after 1 second of inactivity and before leaving a note.");
+            if autosave_changed {
+                self.autosave_retry_at = None;
+                if self.autosave_enabled && self.dirty() && self.last_edit_at.is_none() {
+                    self.last_edit_at = Some(Instant::now());
+                }
+            }
+            ui.add_space(12.0);
             ui.label("Changes apply immediately and are remembered next time.");
             ui.horizontal(|ui| {
                 if ui.button("Reset defaults").clicked() {
                     self.fonts = FontSettings::default();
+                    self.autosave_enabled = false;
+                    self.autosave_retry_at = None;
                     changed = true;
                 }
                 done = ui.button("Done").clicked();
@@ -394,6 +417,8 @@ impl Notes {
                     self.file = Some(path);
                     self.text.clear();
                     self.saved.clear();
+                    self.last_edit_at = None;
+                    self.autosave_retry_at = None;
                     self.view = View::Markdown;
                     self.live_editor = live::LiveEditor::default();
                     self.status = "Note created".into();
@@ -409,26 +434,101 @@ impl Notes {
         self.text != self.saved
     }
 
-    fn save(&mut self) -> bool {
+    fn note_edited(&mut self) {
+        if self.dirty() {
+            self.last_edit_at = Some(Instant::now());
+            self.autosave_retry_at = None;
+        } else {
+            self.last_edit_at = None;
+            self.autosave_retry_at = None;
+        }
+    }
+
+    fn write_contents(&self) -> io::Result<()> {
         let Some(path) = &self.file else {
-            return true;
+            return Ok(());
         };
-        match fs::write(path, &self.text) {
+        fs::write(path, &self.text)
+    }
+
+    fn mark_saved(&mut self, status: &str) {
+        self.saved.clone_from(&self.text);
+        self.last_edit_at = None;
+        self.autosave_retry_at = None;
+        self.status = status.into();
+    }
+
+    fn save(&mut self) -> bool {
+        match self.write_contents() {
             Ok(()) => {
-                self.saved.clone_from(&self.text);
-                self.status = "Saved".into();
+                self.mark_saved("Saved");
                 true
             }
             Err(error) => {
                 self.status = format!("Could not save: {error}");
+                if self.autosave_enabled {
+                    self.autosave_retry_at = Some(Instant::now() + AUTOSAVE_RETRY_DELAY);
+                }
                 false
             }
+        }
+    }
+
+    fn autosave(&mut self, now: Instant) -> bool {
+        match self.write_contents() {
+            Ok(()) => {
+                self.mark_saved("Autosaved");
+                true
+            }
+            Err(error) => {
+                self.autosave_retry_at = Some(now + AUTOSAVE_RETRY_DELAY);
+                self.status = format!("Autosave failed: {error}");
+                false
+            }
+        }
+    }
+
+    fn autosave_if_due_at(&mut self, now: Instant) -> Option<Duration> {
+        if !self.autosave_enabled {
+            return None;
+        }
+        if !self.dirty() {
+            self.last_edit_at = None;
+            self.autosave_retry_at = None;
+            return None;
+        }
+        if let Some(retry_at) = self.autosave_retry_at
+            && now < retry_at
+        {
+            return Some(retry_at - now);
+        }
+        let Some(last_edit_at) = self.last_edit_at else {
+            self.last_edit_at = Some(now);
+            return Some(AUTOSAVE_DELAY);
+        };
+        let Some(elapsed) = now.checked_duration_since(last_edit_at) else {
+            return Some(AUTOSAVE_DELAY);
+        };
+        if elapsed < AUTOSAVE_DELAY {
+            return Some(AUTOSAVE_DELAY - elapsed);
+        }
+        self.autosave(now);
+        self.autosave_retry_at
+            .map(|retry_at| retry_at.saturating_duration_since(now))
+    }
+
+    fn autosave_if_due(&mut self, ctx: &egui::Context) {
+        if let Some(delay) = self.autosave_if_due_at(Instant::now()) {
+            ctx.request_repaint_after(delay);
         }
     }
 
     fn may_leave(&mut self) -> bool {
         if !self.dirty() {
             return true;
+        }
+        if self.autosave_enabled {
+            return self.autosave(Instant::now());
         }
         match rfd::MessageDialog::new()
             .set_title("Unsaved changes")
@@ -554,6 +654,8 @@ impl Notes {
                     self.saved = text.clone();
                     self.text = text;
                     self.file = Some(path);
+                    self.last_edit_at = None;
+                    self.autosave_retry_at = None;
                     self.live_editor = live::LiveEditor::default();
                     self.status.clear();
                 }
@@ -578,6 +680,7 @@ impl eframe::App for Notes {
                 view: self.view,
                 fonts: self.fonts.clone(),
                 zoom_factor: Some(self.egui_ctx.zoom_factor()),
+                autosave_enabled: self.autosave_enabled,
             },
         );
     }
@@ -774,7 +877,9 @@ impl eframe::App for Notes {
                                 &mut self.text,
                             );
                         } else if self.view == View::Live {
-                            self.live_editor.show(ui, &mut self.text);
+                            if self.live_editor.show(ui, &mut self.text) {
+                                self.note_edited();
+                            }
                         } else {
                             let before = self.text.clone();
                             let output = egui::TextEdit::multiline(&mut self.text)
@@ -789,6 +894,9 @@ impl eframe::App for Notes {
                                 live::continue_task_list(&mut self.text, &before, &mut range);
                                 state.cursor.set_char_range(Some(range));
                                 state.store(ctx, output.response.id);
+                            }
+                            if self.text != before {
+                                self.note_edited();
                             }
                         }
                     });
@@ -810,6 +918,7 @@ impl eframe::App for Notes {
         self.new_note_dialog(ctx);
         self.settings_dialog(ctx);
         self.notebooks_dialog(ctx);
+        self.autosave_if_due(ctx);
     }
 }
 
@@ -1034,6 +1143,7 @@ mod tests {
                 content_size: 26.0,
             },
             text: "Unsaved draft".into(),
+            autosave_enabled: true,
             ..Default::default()
         };
         let mut storage = MemoryStorage::default();
@@ -1045,6 +1155,7 @@ mod tests {
         assert!(restored.view == View::Live);
         assert_eq!(restored.fonts.ui_size, 20.0);
         assert_eq!(restored.fonts.content_size, 26.0);
+        assert!(restored.autosave_enabled);
         assert_eq!(restored.text, "Saved content");
         assert!(!restored.dirty());
         fs::remove_dir_all(&root).unwrap();
@@ -1060,6 +1171,81 @@ mod tests {
             14.0
         );
     }
+
+    #[test]
+    fn autosave_waits_for_idle_period_then_writes_changes() {
+        let root = std::env::temp_dir().join(format!("rust-note-autosave-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let file = root.join("note.md");
+        fs::write(&file, "Saved").unwrap();
+        let mut app = Notes::default();
+        app.open_file(file.clone());
+        app.autosave_enabled = true;
+        app.text = "Edited".into();
+        let edited_at = Instant::now();
+        app.last_edit_at = Some(edited_at);
+
+        assert_eq!(
+            app.autosave_if_due_at(edited_at + AUTOSAVE_DELAY - Duration::from_millis(1)),
+            Some(Duration::from_millis(1))
+        );
+        assert_eq!(fs::read_to_string(&file).unwrap(), "Saved");
+        assert!(app.dirty());
+
+        assert_eq!(app.autosave_if_due_at(edited_at + AUTOSAVE_DELAY), None);
+        assert_eq!(fs::read_to_string(&file).unwrap(), "Edited");
+        assert!(!app.dirty());
+        assert_eq!(app.status, "Autosaved");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn autosave_flushes_before_switching_notes() {
+        let root =
+            std::env::temp_dir().join(format!("rust-note-autosave-switch-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let first = root.join("first.md");
+        let second = root.join("second.md");
+        fs::write(&first, "First").unwrap();
+        fs::write(&second, "Second").unwrap();
+        let mut app = Notes::default();
+        app.open_file(first.clone());
+        app.autosave_enabled = true;
+        app.text = "Edited first".into();
+        app.last_edit_at = Some(Instant::now());
+
+        app.open_file(second.clone());
+
+        assert_eq!(fs::read_to_string(&first).unwrap(), "Edited first");
+        assert_eq!(app.file, Some(second.clone()));
+        assert_eq!(app.text, "Second");
+        assert!(!app.dirty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failed_autosave_keeps_draft_dirty_and_retries_later() {
+        let now = Instant::now();
+        let mut app = Notes {
+            file: Some(std::env::temp_dir().join(format!(
+                "rust-note-autosave-missing-{}/note.md",
+                std::process::id()
+            ))),
+            text: "Draft".into(),
+            saved: "Saved".into(),
+            autosave_enabled: true,
+            last_edit_at: Some(now),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            app.autosave_if_due_at(now + AUTOSAVE_DELAY),
+            Some(AUTOSAVE_RETRY_DELAY)
+        );
+        assert!(app.dirty());
+        assert!(app.status.starts_with("Autosave failed:"));
+    }
+
     #[test]
     fn create_subfolder_rejects_collisions_and_invalid_paths() {
         let root =

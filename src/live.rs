@@ -229,7 +229,7 @@ fn layout(source: &str, size: f32, color: Color32, active: Range<usize>) -> Layo
 }
 
 impl LiveEditor {
-    pub fn show(&mut self, ui: &mut egui::Ui, text: &mut String) {
+    pub fn show(&mut self, ui: &mut egui::Ui, text: &mut String) -> bool {
         let id = ui.id().with("continuous_live_editor");
         let before = text.clone();
         let selection = if ui.memory(|m| m.has_focus(id)) {
@@ -299,6 +299,7 @@ impl LiveEditor {
             self.selection = next;
             ui.ctx().request_repaint();
         }
+        text != &before
     }
 }
 
