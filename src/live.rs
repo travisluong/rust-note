@@ -63,8 +63,10 @@ fn layout(source: &str, size: f32, color: Color32, active: Range<usize>) -> Layo
     };
     let mut formats = vec![base.clone(); source.len()];
     let mut hidden = vec![false; source.len()];
+    let mut task_hidden = vec![false; source.len()];
     for marker in task_markers(source) {
-        hidden[marker.visual].fill(true);
+        hidden[marker.visual.clone()].fill(true);
+        task_hidden[marker.visual].fill(true);
     }
     let options = Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
     for (event, range) in Parser::new_ext(source, options).into_offset_iter() {
@@ -122,10 +124,16 @@ fn layout(source: &str, size: f32, color: Color32, active: Range<usize>) -> Layo
     let mut job = LayoutJob::default();
     for (byte, ch) in source.char_indices() {
         let mut format = formats[byte].clone();
-        if hidden[byte] && !active.contains(&byte) && ch != '\n' && ch != '\r' {
+        if hidden[byte]
+            && (!active.contains(&byte) || task_hidden[byte])
+            && ch != '\n'
+            && ch != '\r'
+        {
             // Near-zero glyphs hide delimiters without breaking egui's source offsets.
-            format.font_id.size = 0.01;
-            format.extra_letter_spacing = 0.0;
+            if !task_hidden[byte] {
+                format.font_id.size = 0.01;
+                format.extra_letter_spacing = 0.0;
+            }
             format.color = Color32::TRANSPARENT;
             format.background = Color32::TRANSPARENT;
             format.underline = egui::Stroke::NONE;

@@ -4,6 +4,7 @@ mod explorer;
 mod live;
 use eframe::egui;
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
+use pulldown_cmark::{Event, Options, Parser, Tag};
 use std::{
     fs, io,
     path::{Path, PathBuf},
@@ -55,6 +56,39 @@ fn name(path: &Path) -> String {
         .unwrap_or(path.as_os_str())
         .to_string_lossy()
         .into_owned()
+}
+
+fn hide_task_list_bullets(ui: &egui::Ui, text: &str, rendered: egui::Rect) {
+    let options = Options::ENABLE_TASKLISTS;
+    let mut depth = 0usize;
+    let mut item_index = 0usize;
+    let body_height = ui.text_style_height(&egui::TextStyle::Body);
+    let space_width =
+        ui.fonts(|fonts| fonts.glyph_width(&egui::FontId::proportional(body_height), ' '));
+    for (event, _) in Parser::new_ext(text, options).into_offset_iter() {
+        match event {
+            Event::Start(Tag::List(_)) => depth += 1,
+            Event::End(pulldown_cmark::TagEnd::List(_)) => depth = depth.saturating_sub(1),
+            Event::Start(Tag::Item) => {
+                if depth > 0 {
+                    item_index += 1;
+                }
+            }
+            Event::TaskListMarker(_) if depth > 0 => {
+                let indent = depth.saturating_sub(1) as f32 * 4.0;
+                let center = egui::pos2(
+                    rendered.left() + (indent + 2.0) * space_width,
+                    rendered.top() + (item_index.saturating_sub(1) as f32 + 0.5) * body_height,
+                );
+                ui.painter().circle_filled(
+                    center,
+                    body_height / 6.0 + 1.5,
+                    ui.visuals().panel_fill,
+                );
+            }
+            _ => {}
+        }
+    }
 }
 
 fn validate_name(filename: &str) -> Result<&str, String> {
@@ -768,11 +802,12 @@ impl eframe::App for Notes {
                     .show(ui, |ui| {
                         set_font_size(ui.style_mut(), self.fonts.content_size);
                         if self.view == View::Read {
-                            CommonMarkViewer::new().show_mut(
+                            let rendered = CommonMarkViewer::new().show_mut(
                                 ui,
                                 &mut self.markdown_cache,
                                 &mut self.text,
                             );
+                            hide_task_list_bullets(ui, &self.text, rendered.response.rect);
                         } else if self.view == View::Live {
                             self.live_editor.show(ui, &mut self.text);
                         } else {
