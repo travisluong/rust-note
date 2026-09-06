@@ -210,9 +210,9 @@ fn layout(source: &str, size: f32, color: Color32, active: Range<usize>) -> Layo
         {
             // Near-zero glyphs hide delimiters without breaking egui's source offsets.
             if task_hidden[byte] {
-                // Reserve the same width for [ ], [x], and [X] while keeping
-                // the original source characters available to the editor.
-                format.font_id = FontId::monospace(size);
+                // Compact fixed-width glyphs reserve room for the checkbox
+                // without changing spacing between [ ], [x], and [X].
+                format.font_id = FontId::monospace(size * 0.5);
                 format.extra_letter_spacing = 0.0;
             } else {
                 format.font_id.size = 0.01;
@@ -390,6 +390,16 @@ mod tests {
                             job.wrap.max_width = width;
                             let galley = ctx.fonts(|fonts| fonts.layout_job(job));
                             let text_start = source.find(']').unwrap() + 2;
+                            if prefix == "-" {
+                                let text_left = galley
+                                    .pos_from_cursor(
+                                        &galley.from_ccursor(egui::text::CCursor::new(text_start)),
+                                    )
+                                    .left();
+                                // Leave room for the 18-point checkbox, with
+                                // less than 12 points before the task text.
+                                assert!((18.0..30.0).contains(&text_left), "{text_left}");
+                            }
                             (text_start..=source.chars().count())
                                 .map(|index| {
                                     galley.pos_from_cursor(
