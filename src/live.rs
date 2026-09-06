@@ -209,7 +209,12 @@ fn layout(source: &str, size: f32, color: Color32, active: Range<usize>) -> Layo
             && ch != '\r'
         {
             // Near-zero glyphs hide delimiters without breaking egui's source offsets.
-            if !task_hidden[byte] {
+            if task_hidden[byte] {
+                // Reserve the same width for [ ], [x], and [X] while keeping
+                // the original source characters available to the editor.
+                format.font_id = FontId::monospace(size);
+                format.extra_letter_spacing = 0.0;
+            } else {
                 format.font_id.size = 0.01;
                 format.extra_letter_spacing = 0.0;
             }
@@ -367,6 +372,38 @@ mod tests {
             cursor_after_task_marker(source, egui::text::CCursor::new(6)).index,
             6
         );
+    }
+
+    #[test]
+    fn toggling_task_markers_preserves_text_positions_and_wrapping() {
+        let ctx = egui::Context::default();
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            for prefix in ["-", "  -", "*", "+", "1."] {
+                for active in [false, true] {
+                    for width in [100.0, 500.0] {
+                        let positions = [" ", "x", "X"].map(|state| {
+                            let source =
+                                format!("{prefix} [{state}] a task with enough words to wrap");
+                            let active = if active { 0..source.len() } else { 0..0 };
+                            let mut job = layout(&source, 16.0, Color32::WHITE, active);
+                            assert_eq!(job.text, source);
+                            job.wrap.max_width = width;
+                            let galley = ctx.fonts(|fonts| fonts.layout_job(job));
+                            let text_start = source.find(']').unwrap() + 2;
+                            (text_start..=source.chars().count())
+                                .map(|index| {
+                                    galley.pos_from_cursor(
+                                        &galley.from_ccursor(egui::text::CCursor::new(index)),
+                                    )
+                                })
+                                .collect::<Vec<_>>()
+                        });
+                        assert_eq!(positions[0], positions[1]);
+                        assert_eq!(positions[0], positions[2]);
+                    }
+                }
+            }
+        });
     }
 
     #[test]
