@@ -269,10 +269,10 @@ impl LiveEditor {
                 egui::vec2(size, size),
             );
             let mut checked = marker.checked;
-            if ui
+            let response = ui
                 .put(rect, egui::Checkbox::without_text(&mut checked))
-                .clicked()
-            {
+                .on_hover_cursor(egui::CursorIcon::PointingHand);
+            if response.clicked() {
                 text.replace_range(marker.source, if checked { "[x]" } else { "[ ]" });
                 ui.ctx().request_repaint();
             }
