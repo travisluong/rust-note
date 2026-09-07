@@ -1098,6 +1098,41 @@ impl eframe::App for Notes {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn read_mode_preserves_line_breaks_and_paragraph_spacing() {
+        for source in [
+            "asdf\nasdf\n\nasdf\nasdf",
+            "asdf\r\nasdf\r\n\r\nasdf\r\nasdf",
+        ] {
+            let ctx = egui::Context::default();
+            let mut text = source.to_owned();
+            let output = ctx.run(Default::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    CommonMarkViewer::new().show_mut(
+                        ui,
+                        &mut CommonMarkCache::default(),
+                        &mut text,
+                    );
+                });
+            });
+            let positions: Vec<_> = output
+                .shapes
+                .iter()
+                .filter_map(|shape| {
+                    if let egui::epaint::Shape::Text(text) = &shape.shape {
+                        (text.galley.text() == "asdf").then_some(text.pos.y)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            assert_eq!(positions.len(), 4);
+            assert!(positions.windows(2).all(|pair| pair[1] > pair[0]));
+            assert!(positions[2] - positions[1] > positions[1] - positions[0]);
+            assert_eq!(text, source);
+        }
+    }
+
     use super::*;
     use eframe::Storage;
     #[derive(Default)]

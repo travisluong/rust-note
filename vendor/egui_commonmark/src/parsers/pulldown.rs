@@ -542,10 +542,8 @@ impl CommonMarkViewerInternal {
             pulldown_cmark::Event::FootnoteReference(footnote) => {
                 footnote_start(ui, &footnote);
             }
-            pulldown_cmark::Event::SoftBreak => {
-                soft_break(ui);
-            }
-            pulldown_cmark::Event::HardBreak => newline(ui),
+            // Preserve note line breaks in read mode, including Markdown soft breaks.
+            pulldown_cmark::Event::SoftBreak | pulldown_cmark::Event::HardBreak => newline(ui),
             pulldown_cmark::Event::Rule => {
                 self.line.try_insert_start(ui);
                 rule(ui, self.line.can_insert_end());
