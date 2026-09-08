@@ -5,35 +5,58 @@ use std::ops::Range;
 #[derive(Default)]
 pub struct LiveEditor {
     selection: Option<(usize, usize)>,
+    parsed: Parsed,
+}
+
+#[derive(Default)]
+struct Parsed {
+    source: String,
+    events: Vec<(Event<'static>, Range<usize>)>,
+    tasks: Vec<TaskMarker>,
+    layout: Option<(f32, Color32, Range<usize>, LayoutJob)>,
+}
+
+impl Parsed {
+    fn update(&mut self, source: &str) {
+        if self.source == source {
+            return;
+        }
+        self.layout = None;
+        self.source.clear();
+        self.source.push_str(source);
+        let options = Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
+        self.events = Parser::new_ext(source, options)
+            .into_offset_iter()
+            .map(|(event, range)| (event.into_static(), range))
+            .collect();
+        self.tasks = task_markers(source, &self.events);
+    }
 }
 
 struct TaskMarker {
     source: Range<usize>,
     visual: Range<usize>,
+    chars: Range<usize>,
     checked: bool,
 }
 
-fn char_index(source: &str, byte: usize) -> usize {
-    source[..byte].chars().count()
-}
-
-fn cursor_after_task_marker(source: &str, cursor: egui::text::CCursor) -> egui::text::CCursor {
-    let byte = source
-        .char_indices()
-        .nth(cursor.index)
-        .map_or(source.len(), |(index, _)| index);
-    for marker in task_markers(source) {
-        if marker.visual.start <= byte && byte <= marker.visual.end {
-            return egui::text::CCursor::new(char_index(source, marker.visual.end));
+fn cursor_after_task_marker(
+    tasks: &[TaskMarker],
+    cursor: egui::text::CCursor,
+) -> egui::text::CCursor {
+    for marker in tasks {
+        if marker.chars.start <= cursor.index && cursor.index <= marker.chars.end {
+            return egui::text::CCursor::new(marker.chars.end);
         }
     }
     cursor
 }
 
-fn task_markers(source: &str) -> Vec<TaskMarker> {
-    let options = Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
-    Parser::new_ext(source, options)
-        .into_offset_iter()
+fn task_markers(source: &str, events: &[(Event<'_>, Range<usize>)]) -> Vec<TaskMarker> {
+    let mut previous_byte = 0;
+    let mut previous_char = 0;
+    events
+        .iter()
         .filter_map(|(event, range)| {
             let Event::TaskListMarker(checked) = event else {
                 return None;
@@ -44,10 +67,15 @@ fn task_markers(source: &str) -> Vec<TaskMarker> {
             let dash = source[line_start..range.start]
                 .rfind('-')
                 .map_or(range.start, |index| line_start + index);
+            let start = previous_char + source[previous_byte..dash].chars().count();
+            let end = start + source[dash..range.end].chars().count();
+            previous_byte = range.end;
+            previous_char = end;
             Some(TaskMarker {
                 source: range.clone(),
                 visual: dash..range.end,
-                checked,
+                chars: start..end,
+                checked: *checked,
             })
         })
         .collect()
@@ -134,98 +162,159 @@ fn active_lines(source: &str, selection: Option<(usize, usize)>) -> Range<usize>
 
 // Layout retains the exact source and character count, so selection, clipboard,
 // undo, and cursor movement all operate on the original Markdown document.
+#[cfg(test)]
 fn layout(source: &str, size: f32, color: Color32, active: Range<usize>) -> LayoutJob {
-    let base = TextFormat {
-        font_id: FontId::proportional(size),
-        color,
-        ..Default::default()
-    };
-    let mut formats = vec![base.clone(); source.len()];
-    let mut hidden = vec![false; source.len()];
-    let mut task_hidden = vec![false; source.len()];
-    for marker in task_markers(source) {
-        hidden[marker.visual.clone()].fill(true);
-        task_hidden[marker.visual].fill(true);
+    let mut parsed = Parsed::default();
+    parsed.update(source);
+    parsed.layout(size, color, active)
+}
+
+impl Parsed {
+    fn layout(&mut self, size: f32, color: Color32, active: Range<usize>) -> LayoutJob {
+        if let Some((cached_size, cached_color, cached_active, job)) = &self.layout
+            && *cached_size == size
+            && *cached_color == color
+            && *cached_active == active
+        {
+            return job.clone();
+        }
+        let job = self.build_layout(size, color, active.clone());
+        self.layout = Some((size, color, active, job.clone()));
+        job
     }
-    let options = Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
-    for (event, range) in Parser::new_ext(source, options).into_offset_iter() {
-        match event {
-            Event::Start(tag) => {
-                match &tag {
-                    Tag::Heading { .. }
-                    | Tag::Strong
-                    | Tag::Emphasis
-                    | Tag::Strikethrough
-                    | Tag::Link { .. } => hidden[range.clone()].fill(true),
-                    _ => {}
-                }
-                for format in &mut formats[range] {
+
+    fn build_layout(&self, size: f32, color: Color32, active: Range<usize>) -> LayoutJob {
+        let source = &self.source;
+        let base = TextFormat {
+            font_id: FontId::proportional(size),
+            color,
+            ..Default::default()
+        };
+        let mut boundaries = vec![0, source.len()];
+        for (_, range) in &self.events {
+            boundaries.extend([range.start, range.end]);
+        }
+        for marker in &self.tasks {
+            boundaries.extend([marker.visual.start, marker.visual.end]);
+        }
+        for (event, range) in &self.events {
+            if matches!(event, Event::Code(_)) {
+                let ticks = source[range.clone()]
+                    .bytes()
+                    .take_while(|b| *b == b'`')
+                    .count();
+                boundaries.extend([range.start + ticks, range.end - ticks]);
+            }
+        }
+        boundaries.sort_unstable();
+        boundaries.dedup();
+        let span = |range: Range<usize>| {
+            boundaries.binary_search(&range.start).unwrap()
+                ..boundaries.binary_search(&range.end).unwrap()
+        };
+        let mut formats = vec![base; boundaries.len()];
+        let mut hidden = vec![false; boundaries.len()];
+        let mut task_hidden = vec![false; boundaries.len()];
+        for marker in &self.tasks {
+            hidden[span(marker.visual.clone())].fill(true);
+            task_hidden[span(marker.visual.clone())].fill(true);
+        }
+        for (event, bytes) in &self.events {
+            let range = span(bytes.clone());
+            match event {
+                Event::Start(tag) => {
                     match &tag {
-                        Tag::Heading { level, .. } => {
-                            format.font_id.size = size * (1.9 - (*level as u8 as f32 - 1.0) * 0.15);
-                            format.color = Color32::WHITE;
-                        }
-                        Tag::Strong => {
-                            format.color = Color32::WHITE;
-                            format.extra_letter_spacing = 0.25;
-                        }
-                        Tag::Emphasis => format.italics = true,
-                        Tag::Strikethrough => {
-                            format.strikethrough = egui::Stroke::new(1.0_f32, color)
-                        }
-                        Tag::Link { .. } => {
-                            format.color = Color32::from_rgb(120, 180, 250);
-                            format.underline = egui::Stroke::new(1.0_f32, format.color);
-                        }
-                        Tag::CodeBlock(_) => {
-                            format.font_id = FontId::monospace(size);
-                            format.background = Color32::from_gray(35);
-                        }
+                        Tag::Heading { .. }
+                        | Tag::Strong
+                        | Tag::Emphasis
+                        | Tag::Strikethrough
+                        | Tag::Link { .. } => hidden[range.clone()].fill(true),
                         _ => {}
                     }
+                    for format in &mut formats[range] {
+                        match &tag {
+                            Tag::Heading { level, .. } => {
+                                format.font_id.size =
+                                    size * (1.9 - (*level as u8 as f32 - 1.0) * 0.15);
+                                format.color = Color32::WHITE;
+                            }
+                            Tag::Strong => {
+                                format.color = Color32::WHITE;
+                                format.extra_letter_spacing = 0.25;
+                            }
+                            Tag::Emphasis => format.italics = true,
+                            Tag::Strikethrough => {
+                                format.strikethrough = egui::Stroke::new(1.0_f32, color)
+                            }
+                            Tag::Link { .. } => {
+                                format.color = Color32::from_rgb(120, 180, 250);
+                                format.underline = egui::Stroke::new(1.0_f32, format.color);
+                            }
+                            Tag::CodeBlock(_) => {
+                                format.font_id = FontId::monospace(size);
+                                format.background = Color32::from_gray(35);
+                            }
+                            _ => {}
+                        }
+                    }
                 }
-            }
-            Event::Text(_) => hidden[range].fill(false),
-            Event::Code(_) => {
-                hidden[range.clone()].fill(false);
-                let raw = &source[range.clone()];
-                let ticks = raw.bytes().take_while(|b| *b == b'`').count();
-                hidden[range.start..range.start + ticks].fill(true);
-                hidden[range.end - ticks..range.end].fill(true);
-                for format in &mut formats[range] {
-                    format.font_id = FontId::monospace(size);
-                    format.background = Color32::from_gray(35);
+                Event::Text(_) => hidden[range].fill(false),
+                Event::Code(_) => {
+                    hidden[range.clone()].fill(false);
+                    let raw = &source[bytes.clone()];
+                    let ticks = raw.bytes().take_while(|b| *b == b'`').count();
+                    hidden[span(bytes.start..bytes.start + ticks)].fill(true);
+                    hidden[span(bytes.end - ticks..bytes.end)].fill(true);
+                    for format in &mut formats[range] {
+                        format.font_id = FontId::monospace(size);
+                        format.background = Color32::from_gray(35);
+                    }
                 }
+                _ => {}
             }
-            _ => {}
         }
-    }
-    let mut job = LayoutJob::default();
-    for (byte, ch) in source.char_indices() {
-        let mut format = formats[byte].clone();
-        if hidden[byte]
-            && (!active.contains(&byte) || task_hidden[byte])
-            && ch != '\n'
-            && ch != '\r'
-        {
-            // Near-zero glyphs hide delimiters without breaking egui's source offsets.
-            if task_hidden[byte] {
-                // Compact fixed-width glyphs reserve room for the checkbox
-                // without changing spacing between [ ], [x], and [X].
-                format.font_id = FontId::monospace(size * 0.5);
-                format.extra_letter_spacing = 0.0;
+        let mut job = LayoutJob::default();
+        let mut section = 0;
+        for (byte, ch) in source.char_indices() {
+            while boundaries[section + 1] <= byte {
+                section += 1;
+            }
+            let mut format = formats[section].clone();
+            if hidden[section]
+                && (!active.contains(&byte) || task_hidden[section])
+                && ch != '\n'
+                && ch != '\r'
+            {
+                // Near-zero glyphs hide delimiters without breaking egui's source offsets.
+                if task_hidden[section] {
+                    // Compact fixed-width glyphs reserve room for the checkbox
+                    // without changing spacing between [ ], [x], and [X].
+                    format.font_id = FontId::monospace(size * 0.5);
+                    format.extra_letter_spacing = 0.0;
+                } else {
+                    format.font_id.size = 0.01;
+                    format.extra_letter_spacing = 0.0;
+                }
+                format.color = Color32::TRANSPARENT;
+                format.background = Color32::TRANSPARENT;
+                format.underline = egui::Stroke::NONE;
+                format.strikethrough = egui::Stroke::NONE;
+            }
+            if let Some(last) = job.sections.last_mut()
+                && last.format == format
+            {
+                last.byte_range.end = byte + ch.len_utf8();
             } else {
-                format.font_id.size = 0.01;
-                format.extra_letter_spacing = 0.0;
+                job.sections.push(egui::text::LayoutSection {
+                    leading_space: 0.0,
+                    byte_range: byte..byte + ch.len_utf8(),
+                    format,
+                });
             }
-            format.color = Color32::TRANSPARENT;
-            format.background = Color32::TRANSPARENT;
-            format.underline = egui::Stroke::NONE;
-            format.strikethrough = egui::Stroke::NONE;
         }
-        job.append(&source[byte..byte + ch.len_utf8()], 0.0, format);
+        job.text.clone_from(source);
+        job
     }
-    job
 }
 
 impl LiveEditor {
@@ -240,7 +329,10 @@ impl LiveEditor {
         let size = egui::TextStyle::Body.resolve(ui.style()).size;
         let color = ui.visuals().text_color();
         let mut layouter = |ui: &egui::Ui, source: &str, width: f32| {
-            let mut job = layout(source, size, color, active_lines(source, selection));
+            self.parsed.update(source);
+            let mut job = self
+                .parsed
+                .layout(size, color, active_lines(source, selection));
             job.wrap.max_width = width;
             ui.fonts(|fonts| fonts.layout_job(job))
         };
@@ -256,8 +348,9 @@ impl LiveEditor {
 
         // Keep the Markdown source editable, but replace task-list markers with
         // native controls positioned over the corresponding rendered text.
-        for marker in task_markers(text) {
-            let char_index = char_index(text, marker.visual.start);
+        self.parsed.update(text);
+        for marker in &self.parsed.tasks {
+            let char_index = marker.chars.start;
             let cursor = output.galley.pos_from_cursor(
                 &output
                     .galley
@@ -273,7 +366,7 @@ impl LiveEditor {
                 .put(rect, egui::Checkbox::without_text(&mut checked))
                 .on_hover_cursor(egui::CursorIcon::Default);
             if response.clicked() {
-                text.replace_range(marker.source, if checked { "[x]" } else { "[ ]" });
+                text.replace_range(marker.source.clone(), if checked { "[x]" } else { "[ ]" });
                 ui.ctx().request_repaint();
             }
         }
@@ -282,9 +375,10 @@ impl LiveEditor {
             continue_task_list(text, &before, &mut range);
             state.cursor.set_char_range(Some(range));
         }
+        self.parsed.update(text);
         let next = state.cursor.char_range().map(|range| {
-            let primary = cursor_after_task_marker(text, range.primary);
-            let secondary = cursor_after_task_marker(text, range.secondary);
+            let primary = cursor_after_task_marker(&self.parsed.tasks, range.primary);
+            let secondary = cursor_after_task_marker(&self.parsed.tasks, range.secondary);
             if primary != range.primary || secondary != range.secondary {
                 state
                     .cursor
@@ -339,14 +433,26 @@ mod tests {
         let source = "# Title\n\n**bold**";
         let inactive = layout(source, 16.0, Color32::GRAY, 0..0);
         assert_eq!(inactive.sections[0].format.color, Color32::TRANSPARENT);
-        assert!(inactive.sections[2].format.font_id.size > 16.0);
+        assert!(
+            inactive
+                .sections
+                .iter()
+                .find(|section| section.byte_range.contains(&2))
+                .unwrap()
+                .format
+                .font_id
+                .size
+                > 16.0
+        );
         let active = layout(source, 16.0, Color32::GRAY, 0..7);
         assert_ne!(active.sections[0].format.color, Color32::TRANSPARENT);
     }
 
     #[test]
     fn task_markers_hide_the_markdown_prefix_and_preserve_checkbox_state() {
-        let markers = task_markers("- [ ] one\n  - [x] two");
+        let mut parsed = Parsed::default();
+        parsed.update("- [ ] one\n  - [x] two");
+        let markers = parsed.tasks;
         assert_eq!(markers.len(), 2);
         assert_eq!(
             &"- [ ] one\n  - [x] two"[markers[0].visual.clone()],
@@ -363,14 +469,16 @@ mod tests {
     #[test]
     fn cursor_skips_over_hidden_task_markers() {
         let source = "- [ ] task";
+        let mut parsed = Parsed::default();
+        parsed.update(source);
         for index in 0..=5 {
             assert_eq!(
-                cursor_after_task_marker(source, egui::text::CCursor::new(index)).index,
+                cursor_after_task_marker(&parsed.tasks, egui::text::CCursor::new(index)).index,
                 5
             );
         }
         assert_eq!(
-            cursor_after_task_marker(source, egui::text::CCursor::new(6)).index,
+            cursor_after_task_marker(&parsed.tasks, egui::text::CCursor::new(6)).index,
             6
         );
     }
@@ -440,5 +548,57 @@ mod tests {
 
         assert!(!continue_task_list(&mut text, before, &mut cursor));
         assert_eq!(text, "plain\ntext");
+    }
+
+    #[test]
+    fn large_preview_reuses_parse_and_groups_plain_text() {
+        let source = "plain Unicode é 🦀 text ".repeat(10_000);
+        let mut parsed = Parsed::default();
+        parsed.update(&source);
+        let events = parsed.events.as_ptr();
+        parsed.update(&source);
+        assert_eq!(parsed.events.as_ptr(), events);
+        let job = parsed.layout(16.0, Color32::GRAY, 0..0);
+        assert_eq!(job.text, source);
+        assert_eq!(job.sections.len(), 1);
+        assert_eq!(parsed.layout(16.0, Color32::GRAY, 0..0), job);
+
+        parsed.update("**bold**");
+        let hidden = parsed.layout(16.0, Color32::GRAY, 0..0);
+        let visible = parsed.layout(16.0, Color32::GRAY, 0..8);
+        assert_eq!(hidden.sections[0].format.color, Color32::TRANSPARENT);
+        assert_ne!(visible.sections[0].format.color, Color32::TRANSPARENT);
+        assert_eq!(
+            parsed.layout(20.0, Color32::GRAY, 0..8).sections[0]
+                .format
+                .font_id
+                .size,
+            20.0
+        );
+        parsed.update("plain");
+        assert_eq!(
+            parsed.layout(16.0, Color32::RED, 0..0).sections[0]
+                .format
+                .color,
+            Color32::RED
+        );
+
+        parsed.update("é 🦀\n- [ ] first\n- [x] second");
+        for marker in &parsed.tasks {
+            assert_eq!(
+                marker.chars.start,
+                parsed.source[..marker.visual.start].chars().count()
+            );
+            assert_eq!(
+                marker.chars.end,
+                parsed.source[..marker.visual.end].chars().count()
+            );
+        }
+        assert!(!parsed.tasks[0].checked);
+        parsed.update("é 🦀\n- [x] first\n- [x] second");
+        assert!(parsed.tasks[0].checked);
+        parsed.update("");
+        assert!(parsed.tasks.is_empty());
+        assert!(parsed.layout(16.0, Color32::GRAY, 0..0).text.is_empty());
     }
 }
